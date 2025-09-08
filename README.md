@@ -26,11 +26,12 @@ Spectrum Analyzer
 ```
 # clone with
 git clone git@github.com:aguaviva/spectrogrammer.git --recurse-submodules --shallow-submodules
-# build kissfft
-make kissfft
-# build and run the app (connect your cellphone!)
-make push run 
-```
+
+# Android
+> make BUILD_ANDROID=y
+> make push run 
+# Linux
+> make BUILD_ANDROID=n
 
 ## Notes/stuff I need help with:
 - If app loses focus will crash/lose data
