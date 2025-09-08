@@ -37,7 +37,8 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
                 pSelectedFilename = pTmp->pStr;
 
                 char filename[1024];
-                strcpy(filename, "/sdcard/Documents/");
+                strcpy(filename, pWorkingDirectory);
+                strcat(filename, "/");
                 strcat(filename, pTmp->pStr);
 
                 res = LoadSpectrum(filename, pBuffer, sample_rate, fft_size);
@@ -66,7 +67,7 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
         tm_info = localtime(&timer);
 
         char filename[1024];
-        strcpy(filename, "/sdcard/Documents/");
+        strcpy(filename, pWorkingDirectory);
         strcat(filename, "/");
         strftime(&filename[strlen(filename)], 1024, "%Y%m%d-%H%M%S_data.spec", tm_info);
 

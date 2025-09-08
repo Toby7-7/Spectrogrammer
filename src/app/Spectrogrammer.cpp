@@ -135,7 +135,7 @@ void Spectrogrammer_Init(void *window)
 {
 #ifdef ANDROID    
     android_app * pApp = (android_app *)window;
-    pWorkingDirectory = pApp->activity->internalDataPath;
+    pWorkingDirectory = "/sdcard/Documents"; //pApp->activity->internalDataPath;
 #else    
     pWorkingDirectory = ".";
 #endif
