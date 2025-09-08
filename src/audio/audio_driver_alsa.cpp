@@ -13,7 +13,7 @@
   sudo apt-get install libasound2-dev
   gcc -o alsa-record-example -lasound alsa-record-example.c && ./alsa-record-example hw:0
 */
-#ifndef ANDROID
+#ifdef ALSA_DRIVER
 
 #include <stdio.h>
 #include <stdlib.h>

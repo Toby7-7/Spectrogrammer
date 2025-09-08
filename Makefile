@@ -1,5 +1,6 @@
 #Copyright (c) 2019-2020 <>< Charles Lohr - Under the MIT/x11 or NewBSD License you choose.
 # NO WARRANTY! NO GUARANTEE OF SUPPORT! USE AT YOUR OWN RISK
+
 BUILD_ANDROID:=y
 DEBUG:=n
 
@@ -25,7 +26,9 @@ SRC=$(SRC_DIR)/main_android.cpp $(SRC_DIR)/android_native_app_glue.c
 SRC+=$(shell find $(SRC_DIR)/audio -name '*.cpp')
 else
 SRC=$(SRC_DIR)/main_linux.cpp
-SRC+=$(SRC_DIR)/audio/alsa_driver.cpp
+#SRC+=$(SRC_DIR)/audio/audio_driver_sdl.cpp
+CFLAGS+= -DALSA_DRIVER
+SRC+=$(SRC_DIR)/audio/audio_driver_alsa.cpp
 endif
 
 # Add app source files
@@ -34,7 +37,6 @@ SRC+=$(shell find $(SRC_DIR)/app -name '*.cpp')
 CFLAGS?=-ffunction-sections  -fdata-sections -Wall -fvisibility=hidden -fno-exceptions -fno-rtti -fno-sized-deallocation
 # For really tight compiles....
 CFLAGS += -fvisibility=hidden
-
 
 LDFLAGS?=-Wl,--gc-sections -Wl,-Map=output.map 
 ifeq ($(DEBUG),y)
@@ -114,6 +116,8 @@ LDFLAGS += -shared -uANativeActivity_onCreate
 AAPT:=$(BUILD_TOOLS)/aapt
 endif
 
+########################### ARCHITECTURE ######################################
+
 ifeq ($(ARCH),arm64-v8a)
 CFLAGS_2+=-m64
 
@@ -140,6 +144,7 @@ ifeq ($(ARCH),x86_64)
 LDFLAGS += -lGL `pkg-config --static --libs glfw3` 
 LDFLAGS += -lX11 -lpthread -lXinerama -lXext -lGL -lm -ldl -lstdc++
 LDFLAGS += -lasound
+#LDFLAGS += -lSDL2
 LDFLAGS += `pkg-config --libs libs/x86_64/kissfft/lib64/pkgconfig/kissfft-float.pc`
 ARCH_DIR=$(ARCH)
 CFLAGS += `pkg-config --cflags glfw3` 
@@ -173,11 +178,14 @@ folders:
 	mkdir -p makecapk/lib/x86
 	mkdir -p makecapk/lib/x86_64
 
-
 kissfft:
-	make -C submodules/kissfft PREFIX=../../libs/$(ARCH)/kissfft LD=$(LD) CC=$(CC) AR=$(AR) KISSFFT_DATATYPE=float KISSFFT_STATIC=1 KISSFFT_TOOLS=0 KISSFFT_OPENMP=0 CFLAGS=-DNDEBUG=1 install 
-	make -C submodules/kissfft clean
-	
+	@if [ -d "libs/$(ARCH)/kissfft" ]; then \
+		echo "KissFFT already built libs/$(ARCH)/kissfft"; \
+	else \
+		make -C submodules/kissfft PREFIX=../../libs/$(ARCH)/kissfft LD=$(LD) CC=$(CC) AR=$(AR) KISSFFT_DATATYPE=float KISSFFT_STATIC=1 KISSFFT_TOOLS=0 KISSFFT_OPENMP=0 CFLAGS=-DNDEBUG=1 install; \
+		make -C submodules/kissfft clean; \
+	fi
+
 ################## IMGUI
 
 IMGUI_SRCS := imgui.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp backends/imgui_impl_opengl3.cpp
@@ -197,7 +205,7 @@ libs/$(ARCH)/imgui/libimgui.a : $(addprefix libs/$(ARCH)/imgui/objs/,$(subst .cp
 
 ###############
 
-makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so : $(ANDROIDSRCS) libs/$(ARCH)/imgui/libimgui.a #kissfft
+makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so : $(ANDROIDSRCS) libs/$(ARCH)/imgui/libimgui.a | kissfft
 	mkdir -p makecapk/lib/$(ARCH_DIR)	
 	$(CC) $(CFLAGS) $(LDFLAGS) $(CFLAGS_2) -o $@ $(ANDROIDSRCS) libs/$(ARCH)/imgui/libimgui.a -L$(NDK)/toolchains/llvm/prebuilt/$(OS_NAME)/sysroot/usr/lib/$(ARCH_DIR)-linux-android/$(ANDROIDVERSION) $(LDFLAGS) 
 
@@ -211,9 +219,9 @@ makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so : $(ANDROIDSRCS) libs/$(ARCH)/imgui/li
 #jarsigner -verify -verbose -certs makecapk.apk
 
 
-linux_version : $(SRC) libs/$(ARCH)/imgui/libimgui.a
+linux_version : $(SRC) libs/$(ARCH)/imgui/libimgui.a | kissfft
 	echo $@ $^
-	$(CC) $(CFLAGS) -o $@ $^  $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^  $(LDFLAGS) 
 	mv $@ $(APPNAME)
 
 makecapk.apk : makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so $(SRC_DIR)/AndroidManifest.xml 
@@ -254,8 +262,8 @@ push : makecapk.apk
 	$(ADB) install -r $(APKFILE)
 
 logcat: push
-	#$(ADB) logcat | $(NDK)/ndk-stack -sym makecapk/lib/arm64-v8a/libSpectrogrammer.so
-	$(ADB) logcat | $(NDK)/ndk-stack -sym makecapk/lib/armeabi-v7a/libSpectrogrammer.so
+	$(ADB) logcat | $(NDK)/ndk-stack -sym makecapk/lib/arm64-v8a/libSpectrogrammer.so
+	#$(ADB) logcat | $(NDK)/ndk-stack -sym makecapk/lib/armeabi-v7a/libSpectrogrammer.so
 
 run : push
 	$(eval ACTIVITYNAME:=$(shell $(AAPT) dump badging $(APKFILE) | grep "launchable-activity" | cut -f 2 -d"'"))

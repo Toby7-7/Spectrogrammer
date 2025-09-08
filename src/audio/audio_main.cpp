@@ -16,6 +16,7 @@
 //#include "jni_interface.h"
 #include "audio_recorder.h"
 #include "audio_common.h"
+#include "audio_SLES.h"
 //#include <jni.h>
 #include <SLES/OpenSLES_Android.h>
 #include <sys/types.h>

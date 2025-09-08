@@ -22,6 +22,7 @@
 #include "waterfall.h"
 #include "audio/audio_main.h"
 #ifdef ANDROID
+#include "audio/audio_SLES.h"
 #include <EGL/egl.h>
 #include "../android_native_app_glue.h"
 #include "backends/imgui_impl_android.h"
