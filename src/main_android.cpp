@@ -31,10 +31,12 @@ static std::string          g_IniFilename = "";
 static void Start(struct android_app* app);
 static void Stop();
 static void Init(struct android_app* app);
+static void Resume(struct android_app* app);
 static void Shutdown();
 static void MainLoopStep();
 static void AndroidDisplayKeyboard(int pShow);
 static int GetAssetData(const char* filename, void** out_data);
+static void keep_screen_on();
 
 // Main code
 static void handleAppCmd(struct android_app* app, int32_t appCmd)
@@ -58,6 +60,9 @@ static void handleAppCmd(struct android_app* app, int32_t appCmd)
     case APP_CMD_GAINED_FOCUS:
     case APP_CMD_LOST_FOCUS:
         break;
+    case APP_CMD_RESUME:
+        Resume(app);
+        break;        
     }
 }
 
@@ -108,6 +113,12 @@ void Stop(  )
 {   
 }
 
+void Resume(struct android_app* app)
+{
+    g_App = app;
+    keep_screen_on();
+}
+
 void Init(struct android_app* app)
 {
     if (g_Initialized)
@@ -115,6 +126,8 @@ void Init(struct android_app* app)
 
     g_App = app;
     ANativeWindow_acquire(g_App->window);
+
+    keep_screen_on();
 
     // Initialize EGL
     // This is mostly boilerplate code for EGL...
@@ -268,6 +281,26 @@ void Shutdown()
 #define ENVCALL envptr,
 #define JAVA_CALL_DETACH       	jnii->DetachCurrentThread( jniiptr );
 #endif
+
+void keep_screen_on() 
+{
+    SETUP_FOR_JAVA_CALL
+
+	jclass activityClass = env->FindClass( ENVCALL "android/app/NativeActivity");
+
+	// Retrieves NativeActivity.
+	jobject lNativeActivity = g_App->activity->clazz;
+
+
+    jmethodID getWindowMethod = env->GetMethodID(ENVCALL activityClass, "getWindow", "()Landroid/view/Window;");
+    jobject lWindow = env->CallObjectMethod(ENVCALL lNativeActivity, getWindowMethod);
+    jclass ClassWindow = env->FindClass( ENVCALL "android/view/Window");
+
+    jmethodID addFlagsMethod = env->GetMethodID(ENVCALL ClassWindow, "addFlags", "(I)V");
+
+    const int FLAG_KEEP_SCREEN_ON = 128;  // 0x80
+    env->CallVoidMethod(ENVCALL lWindow, addFlagsMethod, FLAG_KEEP_SCREEN_ON);
+}
 
 void AndroidDisplayKeyboard(int pShow)
 {
