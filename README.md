@@ -27,11 +27,13 @@ Spectrum Analyzer
 # clone with
 git clone git@github.com:aguaviva/spectrogrammer.git --recurse-submodules --shallow-submodules
 
-# Android
+# Build for Android
 > make BUILD_ANDROID=y
 > make push run 
-# Linux
+
+# Build for Linux
 > make BUILD_ANDROID=n
+```
 
 ## Notes/stuff I need help with:
 - If app loses focus will crash/lose data
