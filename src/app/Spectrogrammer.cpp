@@ -337,7 +337,7 @@ int display_source_channel(int display_channel)
         return 1;
 
     if (gConfig.input_channel_mode == InputChannelMode::StereoIndependent)
-        return gConfig.swap_stereo_order ? (1 - display_channel) : display_channel;
+        return gConfig.swap_stereo_order ? display_channel : (1 - display_channel);
 
     return 0;
 }
@@ -498,6 +498,28 @@ float db_to_power(float value_db)
 float normalized_db(float value_db)
 {
     return clamp(unlerp(gAxisYMin, gAxisYMax, value_db), 0.0f, 1.0f);
+}
+
+float overlay_text_font_size()
+{
+    return ImGui::GetFontSize() * gConfig.overlay_text_scale;
+}
+
+float overlay_text_alpha()
+{
+    return clamp(gConfig.overlay_text_alpha, 0.25f, 1.0f);
+}
+
+ImVec2 calc_overlay_text_size(const char *text)
+{
+    return ImGui::GetFont()->CalcTextSizeA(overlay_text_font_size(), FLT_MAX, 0.0f, text);
+}
+
+ImU32 apply_overlay_text_alpha(ImU32 color, float multiplier = 1.0f)
+{
+    ImVec4 color_vec = ImGui::ColorConvertU32ToFloat4(color);
+    color_vec.w *= overlay_text_alpha() * multiplier;
+    return ImGui::ColorConvertFloat4ToU32(color_vec);
 }
 
 void format_frequency(char *buffer, size_t buffer_size, float freq_hz)
@@ -1635,6 +1657,24 @@ void render_settings_page()
         mark_config_dirty();
     }
 
+    float overlay_scale = gConfig.overlay_text_scale;
+    render_setting_label("图上标注字号");
+    set_full_width_item();
+    if (ImGui::SliderFloat("##overlay_text_scale", &overlay_scale, 0.7f, 1.8f, "%.2f 倍"))
+    {
+        gConfig.overlay_text_scale = overlay_scale;
+        mark_config_dirty();
+    }
+
+    float overlay_alpha = gConfig.overlay_text_alpha;
+    render_setting_label("图上标注透明度");
+    set_full_width_item();
+    if (ImGui::SliderFloat("##overlay_text_alpha", &overlay_alpha, 0.25f, 1.0f, "%.2f"))
+    {
+        gConfig.overlay_text_alpha = overlay_alpha;
+        mark_config_dirty();
+    }
+
     render_section_title("频谱");
     render_setting_label("频率轴刻度");
     set_full_width_item();
@@ -1968,10 +2008,12 @@ void update_cursor_state(const ImRect &spectrumFrame, bool spectrumHovered, cons
 void draw_peak_markers(const ImRect &frame_bb)
 {
     std::lock_guard<std::mutex> lock(gStateMutex);
+    const float font_size = overlay_text_font_size();
     for (int channel = 0; channel < display_channel_count(); channel++)
     {
         const DisplayChannelState &state = display_channel_state(channel);
         const ImU32 marker_color = display_channel_live_color(channel);
+        const ImU32 text_color = apply_overlay_text_alpha(marker_color);
         for (int i = 0; i < state.peak_marker_count; i++)
         {
             const PeakMarker &marker = state.peak_markers[i];
@@ -1983,15 +2025,16 @@ void draw_peak_markers(const ImRect &frame_bb)
             char label[112];
             char freq[48];
             format_frequency(freq, sizeof(freq), marker.freq_hz);
-            if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
-                snprintf(label, sizeof(label), "%s %s\n%.0f dB", display_channel_title(channel), freq, marker.value_db);
+            if (display_mode_is_split())
+                snprintf(label, sizeof(label), "%s %s\n%.0f dB", display_source_channel(channel) == 0 ? "左" : "右", freq, marker.value_db);
             else
                 snprintf(label, sizeof(label), "%s\n%.0f dB", freq, marker.value_db);
-            ImVec2 labelPos(x + 8.0f, std::max(frame_bb.Min.y + 8.0f, y - 28.0f - (i + channel * 2) * 18.0f));
+            const ImVec2 label_size = calc_overlay_text_size(label);
+            ImVec2 labelPos(x + 8.0f, std::max(frame_bb.Min.y + 8.0f, y - label_size.y - (float)(i + channel * 2) * (font_size * 0.55f)));
 
             ImGui::GetWindowDrawList()->AddLine(ImVec2(x, frame_bb.Min.y), ImVec2(x, frame_bb.Max.y), marker_color, 1.0f);
             ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(x, y), 5.0f, marker_color);
-            ImGui::GetWindowDrawList()->AddText(labelPos, marker_color, label);
+            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), font_size, labelPos, text_color, label);
         }
     }
 }
@@ -2034,13 +2077,14 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int
 
     const float anchor_x = lerp(normalized_x, anchorFrame.Min.x, anchorFrame.Max.x);
     const ImU32 cursorColor = IM_COL32(70, 255, 180, 255);
-    const ImVec2 freqSize = ImGui::CalcTextSize(freqLabel);
+    const float font_size = overlay_text_font_size();
+    const ImVec2 freqSize = calc_overlay_text_size(freqLabel);
     float boxWidth = freqSize.x + 16.0f;
     float boxHeight = freqSize.y + 12.0f;
     ImVec2 dbSizes[kMaxInputChannels];
     for (int channel = 0; channel < display_channel_count(); channel++)
     {
-        dbSizes[channel] = ImGui::CalcTextSize(dbLabels[channel]);
+        dbSizes[channel] = calc_overlay_text_size(dbLabels[channel]);
         boxWidth = std::max(boxWidth, dbSizes[channel].x + 16.0f);
         boxHeight += dbSizes[channel].y + 4.0f;
     }
@@ -2073,11 +2117,16 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int
         ImVec2(boxX + boxWidth, boxY + boxHeight),
         IM_COL32(70, 255, 180, 140),
         6.0f);
-    ImGui::GetWindowDrawList()->AddText(ImVec2(boxX + 8.0f, boxY + 5.0f), cursorColor, freqLabel);
+    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), font_size, ImVec2(boxX + 8.0f, boxY + 5.0f), apply_overlay_text_alpha(cursorColor), freqLabel);
     float textY = boxY + 9.0f + freqSize.y;
     for (int channel = 0; channel < display_channel_count(); channel++)
     {
-        ImGui::GetWindowDrawList()->AddText(ImVec2(boxX + 8.0f, textY), display_channel_live_color(channel), dbLabels[channel]);
+        ImGui::GetWindowDrawList()->AddText(
+            ImGui::GetFont(),
+            font_size,
+            ImVec2(boxX + 8.0f, textY),
+            apply_overlay_text_alpha(display_channel_live_color(channel)),
+            dbLabels[channel]);
         textY += dbSizes[channel].y + 4.0f;
     }
 }
@@ -2115,11 +2164,17 @@ void draw_spectrum(const ImRect &frame_bb)
     if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
     {
         float legend_x = frame_bb.Min.x + 10.0f;
+        const float font_size = overlay_text_font_size();
         for (int channel = 0; channel < display_channel_count(); channel++)
         {
             const char *label = display_channel_title(channel);
-            ImGui::GetWindowDrawList()->AddText(ImVec2(legend_x, frame_bb.Min.y + 8.0f), display_channel_live_color(channel), label);
-            legend_x += ImGui::CalcTextSize(label).x + 20.0f;
+            ImGui::GetWindowDrawList()->AddText(
+                ImGui::GetFont(),
+                font_size,
+                ImVec2(legend_x, frame_bb.Min.y + 8.0f),
+                apply_overlay_text_alpha(display_channel_live_color(channel)),
+                label);
+            legend_x += calc_overlay_text_size(label).x + 20.0f;
         }
     }
 }
@@ -2200,8 +2255,10 @@ void render_main_screen()
         {
             const char *label = display_channel_title(channel);
             ImGui::GetWindowDrawList()->AddText(
+                ImGui::GetFont(),
+                overlay_text_font_size(),
                 ImVec2(waterfallFrames[channel].Min.x + 10.0f, waterfallFrames[channel].Min.y + 8.0f),
-                display_channel_live_color(channel),
+                apply_overlay_text_alpha(display_channel_live_color(channel)),
                 label);
         }
 

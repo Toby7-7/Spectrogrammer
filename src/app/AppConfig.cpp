@@ -10,7 +10,7 @@
 
 namespace
 {
-constexpr int kConfigVersion = 8;
+constexpr int kConfigVersion = 9;
 
 void migrate_config(AppConfig *config)
 {
@@ -74,6 +74,13 @@ void migrate_config(AppConfig *config)
             config->input_channel_mode = InputChannelMode::StereoIndependent;
         config->swap_stereo_order = false;
         config->show_spectrum = true;
+        config->version = 8;
+    }
+
+    if (config->version < 9)
+    {
+        config->overlay_text_scale = 1.0f;
+        config->overlay_text_alpha = 0.82f;
         config->version = kConfigVersion;
     }
 }
@@ -119,6 +126,8 @@ AppConfig MakeDefaultAppConfig()
     config.window_function = WindowFunctionType::BlackmanHarris;
     config.desired_transform_interval_ms = 20.0f;
     config.exponential_smoothing_factor = 0.10f;
+    config.overlay_text_scale = 1.0f;
+    config.overlay_text_alpha = 0.82f;
     config.frequency_axis_scale = FrequencyAxisScale::Logarithmic;
     config.waterfall_size_mode = WaterfallSizeMode::TwoThirds;
     config.swap_stereo_order = false;
@@ -172,6 +181,10 @@ bool LoadAppConfig(const char *path, AppConfig *config)
             loaded.desired_transform_interval_ms = strtof(value, nullptr);
         else if (strcmp(key, "exponential_smoothing_factor") == 0)
             loaded.exponential_smoothing_factor = strtof(value, nullptr);
+        else if (strcmp(key, "overlay_text_scale") == 0)
+            loaded.overlay_text_scale = strtof(value, nullptr);
+        else if (strcmp(key, "overlay_text_alpha") == 0)
+            loaded.overlay_text_alpha = strtof(value, nullptr);
         else if (strcmp(key, "frequency_axis_scale") == 0)
             loaded.frequency_axis_scale = static_cast<FrequencyAxisScale>(atoi(value));
         else if (strcmp(key, "waterfall_size_mode") == 0)
@@ -229,6 +242,14 @@ bool LoadAppConfig(const char *path, AppConfig *config)
         loaded.exponential_smoothing_factor = 0.0f;
     if (loaded.exponential_smoothing_factor > 0.99f)
         loaded.exponential_smoothing_factor = 0.99f;
+    if (loaded.overlay_text_scale < 0.7f)
+        loaded.overlay_text_scale = 0.7f;
+    if (loaded.overlay_text_scale > 1.8f)
+        loaded.overlay_text_scale = 1.8f;
+    if (loaded.overlay_text_alpha < 0.25f)
+        loaded.overlay_text_alpha = 0.25f;
+    if (loaded.overlay_text_alpha > 1.0f)
+        loaded.overlay_text_alpha = 1.0f;
     if (loaded.peak_hold_falloff_seconds < 0.0f)
         loaded.peak_hold_falloff_seconds = 0.0f;
     if (loaded.peak_hold_falloff_seconds > 120.0f)
@@ -265,6 +286,8 @@ bool SaveAppConfig(const char *path, const AppConfig &config)
     fprintf(file, "window_function=%d\n", static_cast<int>(config.window_function));
     fprintf(file, "desired_transform_interval_ms=%.6f\n", config.desired_transform_interval_ms);
     fprintf(file, "exponential_smoothing_factor=%.6f\n", config.exponential_smoothing_factor);
+    fprintf(file, "overlay_text_scale=%.6f\n", config.overlay_text_scale);
+    fprintf(file, "overlay_text_alpha=%.6f\n", config.overlay_text_alpha);
     fprintf(file, "frequency_axis_scale=%d\n", static_cast<int>(config.frequency_axis_scale));
     fprintf(file, "waterfall_size_mode=%d\n", static_cast<int>(config.waterfall_size_mode));
     fprintf(file, "swap_stereo_order=%d\n", config.swap_stereo_order ? 1 : 0);

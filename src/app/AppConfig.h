@@ -82,6 +82,8 @@ struct AppConfig
     WindowFunctionType window_function;
     float desired_transform_interval_ms;
     float exponential_smoothing_factor;
+    float overlay_text_scale;
+    float overlay_text_alpha;
     FrequencyAxisScale frequency_axis_scale;
     WaterfallSizeMode waterfall_size_mode;
     bool swap_stereo_order;
