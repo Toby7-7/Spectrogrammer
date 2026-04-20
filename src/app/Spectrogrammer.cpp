@@ -1320,9 +1320,9 @@ const char *input_channel_label(InputChannelMode mode)
     case InputChannelMode::Mono:
         return "单声道";
     case InputChannelMode::Left:
-        return "只看左声道";
+        return "左声道";
     case InputChannelMode::Right:
-        return "只看右声道";
+        return "右声道";
     case InputChannelMode::StereoMixed:
         return "双声道混合";
     case InputChannelMode::StereoDifference:
