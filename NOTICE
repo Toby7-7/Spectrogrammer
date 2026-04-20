@@ -1,0 +1,46 @@
+Spectrogrammer Fork Notice
+
+This repository is a fork of:
+
+- https://github.com/aguaviva/Spectrogrammer
+
+It also incorporates or depends on material originating from:
+
+- Android Open Source Project native audio sample components
+- cnlohr/rawdrawandroid and related platform helper code
+- Dear ImGui
+- KISS FFT
+
+Repository-wide notice:
+
+- No single license applies to every file in this repository.
+- File headers, bundled component licenses, submodule licenses, and the root
+  LICENSE summary should be read together.
+
+Clearly identified components and notices:
+
+- Files carrying Android Open Source Project headers remain under Apache
+  License 2.0.
+- Files carrying Charles Lohr notices remain available under the terms stated
+  in those file headers, including MIT/X11 or New BSD where offered there.
+- submodules/imgui remains under the MIT License.
+- submodules/kissfft remains under the BSD 3-Clause License.
+
+Fork-added standalone files licensed under Apache License 2.0 by Toby7-7:
+
+- src/app/AppConfig.h
+- src/app/AppConfig.cpp
+- src/java/org/nanoorg/Spectrogrammer/CaptureForegroundService.java
+
+Historical upstream note:
+
+- The upstream repository history previously included a repository-level
+  GPL-3.0 notice and later a CC BY-NC-SA 4.0 notice, and later removed the
+  root LICENSE file.
+- This fork therefore does not assert a blanket relicensing of inherited
+  upstream files.
+
+Practical compliance rule:
+
+- Preserve existing file-level and submodule-level notices when copying or
+  redistributing code from this repository.

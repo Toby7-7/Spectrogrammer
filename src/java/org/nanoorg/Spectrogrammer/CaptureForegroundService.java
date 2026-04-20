@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Toby7-7
+// SPDX-License-Identifier: Apache-2.0
+
 package org.nanoorg.Spectrogrammer;
 
 import android.app.Notification;

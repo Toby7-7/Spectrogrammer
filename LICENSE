@@ -1,0 +1,35 @@
+Repository Licensing Summary
+
+This repository is a fork and derivative work. It contains material from
+multiple upstream sources and under multiple licenses. No single uniform
+license applies to every file in the tree.
+
+The controlling rules for use, redistribution, and modification are:
+
+1. If a file carries its own copyright and license notice, that notice
+   controls for that file.
+2. If a directory or bundled component carries its own license file, that
+   directory-level notice controls for that component.
+3. Third-party submodules keep their upstream licenses.
+4. New standalone files added in this fork and listed in NOTICE are licensed
+   by Toby7-7 under Apache License 2.0.
+5. If this summary conflicts with a file-level or directory-level notice, the
+   more specific notice controls.
+
+Important provenance note:
+
+- The upstream project history previously contained repository-level LICENSE
+  files naming GPL-3.0 and later Creative Commons BY-NC-SA 4.0, and later
+  removed the root LICENSE file entirely.
+- Because of that inconsistent upstream history, this fork does not claim a
+  blanket relicensing of inherited upstream files.
+- For inherited upstream files without a clear file-level notice, review
+  provenance carefully before redistributing outside the context of this fork.
+
+License texts included in this repository:
+
+- LICENSES/Apache-2.0.txt
+- LICENSES/MIT.txt
+- LICENSES/BSD-3-Clause.txt
+
+Additional attribution and source details are documented in NOTICE.

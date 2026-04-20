@@ -4,6 +4,8 @@
 *.idsig
 *.arsc
 AndroidManifest.xml
+*.keystore
+*.jks
 
 # Generated files
 bin/
@@ -15,5 +17,4 @@ build/
 **/lib/
 **/arm64-v8a/
 *.a
-
 

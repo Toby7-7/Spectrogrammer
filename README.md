@@ -1,6 +1,6 @@
 # 频谱仪 / Spectrogrammer
 
-一个以 Android 竖屏触控为主、同时保留 Linux 构建能力的实时音频频谱分析器。当前分支已经不再是上游 `Spectrogrammer` 的原样镜像，而是围绕中文界面、手机操作和频谱/瀑布图查看做过较大重构的版本。
+一个以 Android 的实时音频频谱分析器。由于 Spectroid 软件不开源且不足以满足部分需求，因此基于上游 `Spectrogrammer` 的原样镜像，围绕中文界面、后台持续分析、手机操作和频谱/瀑布图查看做较大重构。
 
 ## 主要特性
 - 实时频谱曲线与瀑布图
@@ -94,6 +94,12 @@ make BUILD_ANDROID=n
 - 高采样率和 `未处理` 音频源是否可用，完全取决于设备和驱动实现。
 - 本仓库当前优先保证 Android 手机体验，Linux 路线仍保留但不是主要优化目标。
 - 如果切换到设备不支持的高采样率档位，可能无法正常启动录音，应改回更低档位。
+
+## 许可与来源
+- 本仓库是 `aguaviva/Spectrogrammer` 的 fork 和衍生版本，当前仍包含继承和改写自上游的代码，不是从零重写。
+- 当前仓库不对所有继承代码声明单一统一许可证；请以文件头声明、子目录许可证文件、[LICENSE](LICENSE) 和 [NOTICE](NOTICE) 为准。
+- 已明确可识别的来源包括 Android Open Source Project 原生音频样例、`cnlohr/rawdrawandroid`、`Dear ImGui`、`KISS FFT` 以及本 fork 新增代码。
+- 本 fork 新增且不含既有上游代码的独立文件，按 Apache License 2.0 提供；明确列表见 [NOTICE](NOTICE)。
 
 ## 致谢
 - [aguaviva/spectrogrammer](https://github.com/aguaviva/spectrogrammer)
