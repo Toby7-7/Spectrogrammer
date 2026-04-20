@@ -34,6 +34,7 @@
 #ifdef ANDROID
 #include "audio/audio_SLES.h"
 #include <EGL/egl.h>
+#include <jni.h>
 #include <SLES/OpenSLES.h>
 #include <SLES/OpenSLES_AndroidConfiguration.h>
 #include "../android_native_app_glue.h"
@@ -55,8 +56,7 @@ enum HOLDING_STATE
 enum class SettingsPage
 {
     None = 0,
-    Audio = 1,
-    Display = 2,
+    Settings = 1,
 };
 
 struct PeakMarker
@@ -114,7 +114,9 @@ float gAxisYMax = -20.0f;
 float gAxisFreqMin = 0.0f;
 float gAxisFreqMax = 0.0f;
 int gHopSamples = 1024;
-float gSecondsPerRow = 0.02f;
+float gAnalysisSecondsPerFrame = 0.02f;
+float gWaterfallSecondsPerRow = 0.02f;
+float gWaterfallRowAccumulator = 0.0f;
 
 bool gDisplayPaused = false;
 bool gWaterfallInitialized = false;
@@ -122,6 +124,10 @@ int gFrequencyPlotWidth = 0;
 int gWaterfallWidth = 0;
 int gWaterfallHeight = 0;
 SettingsPage gSettingsPage = SettingsPage::None;
+bool gSettingsScrollTracking = false;
+bool gSettingsScrollDragging = false;
+ImVec2 gSettingsScrollStartMousePos = ImVec2(0.0f, 0.0f);
+float gSettingsScrollStartY = 0.0f;
 bool gCloseHoldPopupRequested = false;
 PinchGestureState gPinchGesture;
 
@@ -142,16 +148,20 @@ BufferIODouble gPeakScaledPowerXY;
 BufferIODouble gReferenceScaledPowerY;
 BufferIODouble gReferenceScaledPowerXY;
 
+#ifdef ANDROID
+android_app *gAndroidApp = nullptr;
+#endif
+
 constexpr int kDefaultAndroidSampleRate = 48000;
 constexpr int kAudioBufferLength = 1024;
 constexpr int kPeakMarkerCapacity = 5;
 constexpr float kToolbarTopPadding = 72.0f;
-constexpr float kToolbarBottomSpacing = 0.0f;
 constexpr float kSpectrumMinimumHeight = 260.0f;
 constexpr float kMinimumTouchButtonHeight = 88.0f;
 constexpr int kProcessingBurstLimit = 32;
 constexpr float kMinimumPinchDistanceNormalized = 0.04f;
 constexpr float kSettingsSideMargin = 28.0f;
+constexpr char kGitHubRepositoryUrl[] = "https://github.com/Toby7-7/Spectrogrammer";
 
 void rebuild_scale_locked(int outputWidth);
 void refresh_display_state_locked(bool updateWaterfall);
@@ -174,6 +184,75 @@ void set_full_width_item()
 float settings_side_margin()
 {
     return std::max(kSettingsSideMargin, ImGui::GetIO().DisplaySize.x * 0.055f);
+}
+
+bool open_url_external(const char *url)
+{
+#ifdef ANDROID
+    if (url == nullptr || gAndroidApp == nullptr || gAndroidApp->activity == nullptr || gAndroidApp->activity->vm == nullptr)
+        return false;
+
+    JNIEnv *env = nullptr;
+    JavaVM *vm = gAndroidApp->activity->vm;
+    if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK || env == nullptr)
+        return false;
+
+    bool opened = false;
+    jobject nativeActivity = gAndroidApp->activity->clazz;
+    jclass activityClass = env->GetObjectClass(nativeActivity);
+    jclass intentClass = env->FindClass("android/content/Intent");
+    jclass uriClass = env->FindClass("android/net/Uri");
+
+    if (activityClass != nullptr && intentClass != nullptr && uriClass != nullptr)
+    {
+        jfieldID actionViewField = env->GetStaticFieldID(intentClass, "ACTION_VIEW", "Ljava/lang/String;");
+        jmethodID intentCtor = env->GetMethodID(intentClass, "<init>", "(Ljava/lang/String;)V");
+        jmethodID parseMethod = env->GetStaticMethodID(uriClass, "parse", "(Ljava/lang/String;)Landroid/net/Uri;");
+        jmethodID setDataMethod = env->GetMethodID(intentClass, "setData", "(Landroid/net/Uri;)Landroid/content/Intent;");
+        jmethodID startActivityMethod = env->GetMethodID(activityClass, "startActivity", "(Landroid/content/Intent;)V");
+
+        if (actionViewField != nullptr && intentCtor != nullptr && parseMethod != nullptr &&
+            setDataMethod != nullptr && startActivityMethod != nullptr)
+        {
+            jstring actionView = static_cast<jstring>(env->GetStaticObjectField(intentClass, actionViewField));
+            jstring urlString = env->NewStringUTF(url);
+            jobject uri = env->CallStaticObjectMethod(uriClass, parseMethod, urlString);
+            jobject intent = env->NewObject(intentClass, intentCtor, actionView);
+
+            if (actionView != nullptr && urlString != nullptr && uri != nullptr && intent != nullptr)
+            {
+                env->CallObjectMethod(intent, setDataMethod, uri);
+                env->CallVoidMethod(nativeActivity, startActivityMethod, intent);
+                opened = !env->ExceptionCheck();
+            }
+
+            if (env->ExceptionCheck())
+                env->ExceptionClear();
+
+            if (intent != nullptr)
+                env->DeleteLocalRef(intent);
+            if (uri != nullptr)
+                env->DeleteLocalRef(uri);
+            if (urlString != nullptr)
+                env->DeleteLocalRef(urlString);
+            if (actionView != nullptr)
+                env->DeleteLocalRef(actionView);
+        }
+    }
+
+    if (uriClass != nullptr)
+        env->DeleteLocalRef(uriClass);
+    if (intentClass != nullptr)
+        env->DeleteLocalRef(intentClass);
+    if (activityClass != nullptr)
+        env->DeleteLocalRef(activityClass);
+
+    vm->DetachCurrentThread();
+    return opened;
+#else
+    (void)url;
+    return false;
+#endif
 }
 
 bool waterfall_visible()
@@ -305,6 +384,28 @@ int configured_sample_rate()
     if (gConfig.sampling_rate_mode == SamplingRateMode::Auto)
         return kDefaultAndroidSampleRate;
     return gConfig.sample_rate_hz;
+}
+
+float clamp_transform_interval_ms(float interval_ms)
+{
+    return clamp(interval_ms, 2.0f, 250.0f);
+}
+
+float interval_ms_to_scroll_speed_percent(float interval_ms)
+{
+    const float clamped_interval = clamp_transform_interval_ms(interval_ms);
+    const float min_log = logf(2.0f);
+    const float max_log = logf(250.0f);
+    return ((max_log - logf(clamped_interval)) / (max_log - min_log)) * 100.0f;
+}
+
+float scroll_speed_percent_to_interval_ms(float speed_percent)
+{
+    const float clamped_speed = clamp(speed_percent, 0.0f, 100.0f);
+    const float min_log = logf(2.0f);
+    const float max_log = logf(250.0f);
+    const float interval_log = max_log - ((max_log - min_log) * (clamped_speed / 100.0f));
+    return expf(interval_log);
 }
 
 std::vector<int> sample_rate_fallbacks(int preferred_rate)
@@ -595,7 +696,7 @@ void processing_loop()
                             }
                             else
                             {
-                                const float falloff_db = (90.0f * gSecondsPerRow) / gConfig.peak_hold_falloff_seconds;
+                                const float falloff_db = (90.0f * gAnalysisSecondsPerFrame) / gConfig.peak_hold_falloff_seconds;
                                 const float held_db = power_to_db(peak_data[i]) - falloff_db;
                                 peak_data[i] = db_to_power(std::max(live_db, held_db));
                             }
@@ -607,8 +708,24 @@ void processing_loop()
                     clear_peak_hold_locked();
                 }
 
+                bool update_waterfall = false;
+                if (gWaterfallSecondsPerRow <= gAnalysisSecondsPerFrame + 1e-6f)
+                {
+                    gWaterfallRowAccumulator = 0.0f;
+                    update_waterfall = true;
+                }
+                else
+                {
+                    gWaterfallRowAccumulator += gAnalysisSecondsPerFrame;
+                    if (gWaterfallRowAccumulator + 1e-6f >= gWaterfallSecondsPerRow)
+                    {
+                        gWaterfallRowAccumulator = fmodf(gWaterfallRowAccumulator, gWaterfallSecondsPerRow);
+                        update_waterfall = true;
+                    }
+                }
+
                 if (!gDisplayPaused)
-                    refresh_display_state_locked(true);
+                    refresh_display_state_locked(update_waterfall);
 
                 processed_frames++;
                 if (processed_frames >= kProcessingBurstLimit)
@@ -653,8 +770,11 @@ void start_processing_session()
         return;
 
     gEffectiveSampleRate = GetEffectiveSampleRate(gConfig);
-    gHopSamples = std::max(1, static_cast<int>(roundf((gConfig.desired_transform_interval_ms / 1000.0f) * gInputSampleRate)));
-    gSecondsPerRow = gHopSamples / gInputSampleRate;
+    const float analysis_interval_ms = std::min(clamp_transform_interval_ms(gConfig.desired_transform_interval_ms), 20.0f);
+    gHopSamples = std::max(1, static_cast<int>(roundf((analysis_interval_ms / 1000.0f) * gInputSampleRate)));
+    gAnalysisSecondsPerFrame = gHopSamples / gInputSampleRate;
+    gWaterfallSecondsPerRow = clamp_transform_interval_ms(gConfig.desired_transform_interval_ms) / 1000.0f;
+    gWaterfallRowAccumulator = 0.0f;
 
     AudioQueue *pFreeQueue = nullptr;
     AudioQueue *pRecQueue = nullptr;
@@ -883,6 +1003,56 @@ void render_setting_label(const char *title)
     ImGui::TextUnformatted(title);
 }
 
+void render_about_section()
+{
+    render_section_title("关于");
+    ImGui::TextWrapped("Spectrogrammer 的中文移动版 fork，当前仓库维护在 GitHub。");
+    ImGui::TextWrapped("仓库：%s", kGitHubRepositoryUrl);
+    if (ImGui::Button("打开 GitHub 仓库", ImVec2(ImGui::GetContentRegionAvail().x, 0.0f)))
+        open_url_external(kGitHubRepositoryUrl);
+#ifndef ANDROID
+    ImGui::TextDisabled("当前平台仅显示仓库链接，不直接拉起浏览器。");
+#endif
+}
+
+void update_settings_drag_scroll()
+{
+    ImGuiIO &io = ImGui::GetIO();
+    const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    if (hovered && ImGui::IsMouseClicked(0))
+    {
+        gSettingsScrollTracking = true;
+        gSettingsScrollDragging = false;
+        gSettingsScrollStartMousePos = io.MousePos;
+        gSettingsScrollStartY = ImGui::GetScrollY();
+    }
+
+    if (!ImGui::IsMouseDown(0))
+    {
+        gSettingsScrollTracking = false;
+        gSettingsScrollDragging = false;
+        return;
+    }
+
+    if (!gSettingsScrollTracking)
+        return;
+
+    const ImVec2 drag_delta(
+        io.MousePos.x - gSettingsScrollStartMousePos.x,
+        io.MousePos.y - gSettingsScrollStartMousePos.y);
+    if (!gSettingsScrollDragging)
+    {
+        if (fabsf(drag_delta.y) < 8.0f || fabsf(drag_delta.y) <= fabsf(drag_delta.x))
+            return;
+        gSettingsScrollDragging = true;
+        ImGui::ClearActiveID();
+    }
+
+    const float next_scroll = clamp(gSettingsScrollStartY - drag_delta.y, 0.0f, ImGui::GetScrollMaxY());
+    if (fabsf(next_scroll - ImGui::GetScrollY()) > 0.01f)
+        ImGui::SetScrollY(next_scroll);
+}
+
 void render_page_header(const char *title)
 {
     ImGui::Dummy(ImVec2(0.0f, top_safe_padding()));
@@ -909,7 +1079,8 @@ void begin_settings_page_layout(const char *title)
         ImVec2(
             std::max(0.0f, avail.x - side_margin),
             std::max(0.0f, avail.y)),
-        false);
+        false,
+        ImGuiWindowFlags_NoScrollbar);
     render_page_header(title);
 }
 
@@ -919,9 +1090,9 @@ void end_settings_page_layout()
     ImGui::PopStyleVar(3);
 }
 
-void render_audio_settings_page()
+void render_settings_page()
 {
-    begin_settings_page_layout("音频");
+    begin_settings_page_layout("设置");
 
     render_section_title("音频");
     render_setting_label("音频源");
@@ -978,6 +1149,7 @@ void render_audio_settings_page()
         }
         ImGui::EndCombo();
     }
+    ImGui::TextDisabled("高采样率取决于设备和驱动支持，不支持时可能无法启动该档位。");
 
     render_section_title("处理");
     render_setting_label("FFT 大小");
@@ -1001,6 +1173,7 @@ void render_audio_settings_page()
         }
         ImGui::EndCombo();
     }
+
     render_setting_label("抽取级数");
     set_full_width_item();
     if (ImGui::BeginCombo("##decimations", decimations_label(gConfig)))
@@ -1023,6 +1196,7 @@ void render_audio_settings_page()
         }
         ImGui::EndCombo();
     }
+
     render_setting_label("窗函数");
     set_full_width_item();
     if (ImGui::BeginCombo("##window_function", window_function_label(gConfig.window_function)))
@@ -1048,16 +1222,6 @@ void render_audio_settings_page()
         ImGui::EndCombo();
     }
 
-    float interval_ms = gConfig.desired_transform_interval_ms;
-    render_setting_label("滚动速度（ms，越小越快）");
-    set_full_width_item();
-    if (ImGui::SliderFloat("##transform_interval", &interval_ms, 2.0f, 250.0f, "%.0f ms"))
-    {
-        gConfig.desired_transform_interval_ms = interval_ms;
-        mark_config_dirty();
-        restart_processing_session();
-    }
-
     float smoothing = gConfig.exponential_smoothing_factor;
     render_setting_label("指数平滑因子（越大越平滑）");
     set_full_width_item();
@@ -1066,14 +1230,6 @@ void render_audio_settings_page()
         gConfig.exponential_smoothing_factor = smoothing;
         mark_config_dirty();
     }
-
-    ImGui::TextDisabled("高采样率取决于设备和驱动支持，不支持时可能无法启动该档位。");
-    end_settings_page_layout();
-}
-
-void render_display_settings_page()
-{
-    begin_settings_page_layout("显示");
 
     render_section_title("频谱");
     render_setting_label("频率轴刻度");
@@ -1096,29 +1252,6 @@ void render_display_settings_page()
                 gConfig.frequency_axis_scale = scale;
                 mark_config_dirty();
                 apply_display_change(true, true);
-            }
-            if (selected)
-                ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-
-    render_setting_label("瀑布图高度");
-    set_full_width_item();
-    if (ImGui::BeginCombo("##waterfall_size", waterfall_size_label(gConfig.waterfall_size_mode)))
-    {
-        const WaterfallSizeMode items[] = {
-            WaterfallSizeMode::OneThird,
-            WaterfallSizeMode::OneHalf,
-            WaterfallSizeMode::TwoThirds,
-        };
-        for (WaterfallSizeMode mode : items)
-        {
-            const bool selected = gConfig.waterfall_size_mode == mode;
-            if (ImGui::Selectable(waterfall_size_label(mode), selected))
-            {
-                gConfig.waterfall_size_mode = mode;
-                mark_config_dirty();
             }
             if (selected)
                 ImGui::SetItemDefaultFocus();
@@ -1196,7 +1329,8 @@ void render_display_settings_page()
         }
         ImGui::EndCombo();
     }
-    render_section_title("运行");
+
+    render_section_title("瀑布图");
     bool show_waterfall = gConfig.show_waterfall;
     if (ImGui::Checkbox("显示瀑布图", &show_waterfall))
     {
@@ -1205,6 +1339,41 @@ void render_display_settings_page()
         apply_display_change(false, false);
     }
 
+    render_setting_label("瀑布图高度");
+    set_full_width_item();
+    if (ImGui::BeginCombo("##waterfall_size", waterfall_size_label(gConfig.waterfall_size_mode)))
+    {
+        const WaterfallSizeMode items[] = {
+            WaterfallSizeMode::OneThird,
+            WaterfallSizeMode::OneHalf,
+            WaterfallSizeMode::TwoThirds,
+        };
+        for (WaterfallSizeMode mode : items)
+        {
+            const bool selected = gConfig.waterfall_size_mode == mode;
+            if (ImGui::Selectable(waterfall_size_label(mode), selected))
+            {
+                gConfig.waterfall_size_mode = mode;
+                mark_config_dirty();
+            }
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    float scroll_speed_percent = interval_ms_to_scroll_speed_percent(gConfig.desired_transform_interval_ms);
+    render_setting_label("滚动速度（慢到快）");
+    set_full_width_item();
+    if (ImGui::SliderFloat("##transform_interval", &scroll_speed_percent, 0.0f, 100.0f, "%.0f%%"))
+    {
+        gConfig.desired_transform_interval_ms = scroll_speed_percent_to_interval_ms(scroll_speed_percent);
+        mark_config_dirty();
+        restart_processing_session();
+    }
+    ImGui::TextDisabled("当前约 %.0f ms/行", gConfig.desired_transform_interval_ms);
+
+    render_section_title("运行");
     bool background_capture = gConfig.background_capture_enabled;
     if (ImGui::Checkbox("后台采集", &background_capture))
     {
@@ -1218,6 +1387,9 @@ void render_display_settings_page()
         gConfig.stay_awake = stay_awake;
         mark_config_dirty();
     }
+
+    render_about_section();
+    update_settings_drag_scroll();
     end_settings_page_layout();
 }
 
@@ -1230,7 +1402,7 @@ void draw_toolbar()
 
     const float row_height = std::max(68.0f, large_button_height() * 0.76f);
     const float width = ImGui::GetContentRegionAvail().x;
-    const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * 3.0f) / 4.0f;
+    const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
 
     if (ImGui::Button(gDisplayPaused ? "继续" : "暂停", ImVec2(button_width, row_height)))
         gDisplayPaused = !gDisplayPaused;
@@ -1244,12 +1416,8 @@ void draw_toolbar()
     }
 
     ImGui::SameLine();
-    if (ImGui::Button("音频", ImVec2(button_width, row_height)))
-        gSettingsPage = SettingsPage::Audio;
-
-    ImGui::SameLine();
-    if (ImGui::Button("显示", ImVec2(button_width, row_height)))
-        gSettingsPage = SettingsPage::Display;
+    if (ImGui::Button("设置", ImVec2(button_width, row_height)))
+        gSettingsPage = SettingsPage::Settings;
     ImGui::PopStyleVar(3);
 
     float axis_min = 0.0f;
@@ -1501,7 +1669,7 @@ void render_main_screen()
         }
 
         Draw_waterfall(waterfallFrame);
-        Draw_vertical_scale(waterfallFrame, gSecondsPerRow);
+        Draw_vertical_scale(waterfallFrame, gWaterfallSecondsPerRow);
     }
 
     if (spectrumFrame.GetWidth() > 0.0f && spectrumFrame.GetHeight() > 0.0f)
@@ -1520,6 +1688,9 @@ void render_main_screen()
 
 void Spectrogrammer_Init(void *window)
 {
+#ifdef ANDROID
+    gAndroidApp = static_cast<android_app *>(window);
+#endif
     load_config_if_needed(window);
 
     if (!gSessionInitialized)
@@ -1570,10 +1741,8 @@ bool Spectrogrammer_MainLoopStep()
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 20.0f));
     ImGui::Begin("主窗口", nullptr, window_flags);
 
-    if (gSettingsPage == SettingsPage::Audio)
-        render_audio_settings_page();
-    else if (gSettingsPage == SettingsPage::Display)
-        render_display_settings_page();
+    if (gSettingsPage == SettingsPage::Settings)
+        render_settings_page();
     else
         render_main_screen();
 
@@ -1588,6 +1757,8 @@ bool Spectrogrammer_HandleBackPressed()
     if (gSettingsPage != SettingsPage::None)
     {
         gSettingsPage = SettingsPage::None;
+        gSettingsScrollTracking = false;
+        gSettingsScrollDragging = false;
         return true;
     }
 
