@@ -68,7 +68,7 @@ void ChunkerProcessor::releaseAllAudioChunks()
     m_bufferIndex = 0;
 }
 
-bool ChunkerProcessor::PrepareBuffer(Processor **pSpectra, int spectrumCount)
+bool ChunkerProcessor::PrepareBuffer(Processor **pSpectra, int spectrumCount, bool stereoDifferenceMode)
 {
     assert(pSpectra != NULL);
     assert(spectrumCount > 0);
@@ -94,10 +94,24 @@ bool ChunkerProcessor::PrepareBuffer(Processor **pSpectra, int spectrumCount)
         const int toWrite = std::min(destLeft, srcBufLeft);
 
         AU_FORMAT *ptrB0 = GetSampleData(buf) + (m_srcOffsetFrames * m_inputChannels);
-        for (int channel = 0; channel < spectrumCount; channel++)
+        if (stereoDifferenceMode && m_inputChannels >= 2)
         {
-            assert(pSpectra[channel] != NULL);
-            pSpectra[channel]->convertShortToFFT(ptrB0 + channel, m_destOffsetFrames, toWrite, m_inputChannels);
+            m_mixScratch.resize(static_cast<size_t>(toWrite));
+            for (int i = 0; i < toWrite; i++)
+            {
+                const float left = static_cast<float>(Uint16ToFloat(ptrB0 + (i * m_inputChannels)));
+                const float right = static_cast<float>(Uint16ToFloat(ptrB0 + (i * m_inputChannels) + 1));
+                m_mixScratch[static_cast<size_t>(i)] = left - right;
+            }
+            pSpectra[0]->convertFloatToFFT(m_mixScratch.data(), m_destOffsetFrames, toWrite);
+        }
+        else
+        {
+            for (int channel = 0; channel < spectrumCount; channel++)
+            {
+                assert(pSpectra[channel] != NULL);
+                pSpectra[channel]->convertShortToFFT(ptrB0 + channel, m_destOffsetFrames, toWrite, m_inputChannels);
+            }
         }
 
         m_destOffsetFrames += toWrite;
@@ -120,9 +134,9 @@ bool ChunkerProcessor::PrepareBuffer(Processor **pSpectra, int spectrumCount)
     return false;
 }
 
-bool ChunkerProcessor::Process(Processor **pSpectra, int spectrumCount, int hopSamples)
+bool ChunkerProcessor::Process(Processor **pSpectra, int spectrumCount, int hopSamples, bool stereoDifferenceMode)
 {
-    if (PrepareBuffer(pSpectra, spectrumCount))
+    if (PrepareBuffer(pSpectra, spectrumCount, stereoDifferenceMode))
     {
         m_offsetFrames += hopSamples;
         return true;

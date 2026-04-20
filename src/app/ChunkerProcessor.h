@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "Processor.h"
 #define LOGW(...)
 #include "buf_manager.h"
@@ -14,11 +16,12 @@ class ChunkerProcessor
     int m_destOffsetFrames = 0;
     int m_bufferIndex = 0;
     int m_inputChannels = 1;
+    std::vector<float> m_mixScratch;
 
     AudioQueue *m_pRecQueue = NULL;
     AudioQueue *m_pFreeQueue = NULL;
 
-    bool PrepareBuffer(Processor **pSpectra, int spectrumCount);
+    bool PrepareBuffer(Processor **pSpectra, int spectrumCount, bool stereoDifferenceMode);
     AU_FORMAT *GetSampleData(sample_buf *b0)
     {
         return (AU_FORMAT *)b0->buf_;
@@ -30,5 +33,5 @@ public:
     void SetQueues(AudioQueue *pRecQueue, AudioQueue *pFreeQueue, int inputChannels);
     bool releaseUsedAudioChunks();
     void releaseAllAudioChunks();
-    bool Process(Processor **pSpectra, int spectrumCount, int hopSamples);
+    bool Process(Processor **pSpectra, int spectrumCount, int hopSamples, bool stereoDifferenceMode);
 };

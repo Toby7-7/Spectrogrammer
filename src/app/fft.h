@@ -68,22 +68,35 @@ public:
 
     int getProcessedLength() const { return m_pInput_samples.GetSize() * m_decimationFactor; }
 
+    void writeInputSample(float sample, int raw_index)
+    {
+        if ((raw_index % m_decimationFactor) != 0)
+            return;
+
+        const int ii = raw_index / m_decimationFactor;
+        if (ii >= m_pInput_samples.GetSize())
+            return;
+
+        float *m_in_samples = m_pInput_samples.GetData();
+        sample *= apply_window(m_windowFunction, ii, m_pInput_samples.GetSize());
+        m_in_samples[ii] = sample;
+    }
+
     void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length, int inputStride)
     {
-        float *m_in_samples = m_pInput_samples.GetData();
         for (int i = 0; i < length; i++)
         {
-            int raw_index = i + offsetDest;
-            if ((raw_index % m_decimationFactor) != 0)
-                continue;
+            const int raw_index = i + offsetDest;
+            writeInputSample(static_cast<float>(Uint16ToFloat(&input[i * inputStride])), raw_index);
+        }
+    }
 
-            int ii = raw_index / m_decimationFactor;
-            if (ii >= m_pInput_samples.GetSize())
-                break;
-
-            float val = Uint16ToFloat(&input[i * inputStride]);
-            val *= apply_window(m_windowFunction, ii, m_pInput_samples.GetSize());
-            m_in_samples[ii] = val;
+    void convertFloatToFFT(const float *input, int offsetDest, int length)
+    {
+        for (int i = 0; i < length; i++)
+        {
+            const int raw_index = i + offsetDest;
+            writeInputSample(input[i], raw_index);
         }
     }
 

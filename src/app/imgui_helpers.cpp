@@ -6,6 +6,7 @@
 #include "imgui_internal.h"
 #include "imgui_helpers.h"
 #include <stdlib.h>
+#include <vector>
 
 bool block_add(const char *label, const ImVec2& size_arg, ImRect *pFrame_bb, bool *pHovered)
 {
@@ -90,11 +91,6 @@ static float lerp( float min, float max, float t )
     return min*(1.0-t) + max*t;
 }
 
-static float unlerp( float min, float max, float x)
-{
-    return (x - min)/(max - min);
-}
-
 void draw_lines(ImRect frame_bb, float *pData, int values_count, ImU32 col, float scale_min_y, float scale_max_y)
 {
     if (pData==NULL || values_count==0)
@@ -107,23 +103,38 @@ void draw_lines(ImRect frame_bb, float *pData, int values_count, ImU32 col, floa
     get_max_min(&pData[1], 2, values_count, &scale_max_y, &scale_min_y);
 
     const float inv_scale_y = (scale_min_y == scale_max_y) ? 0.0f : (1.0f / (scale_max_y - scale_min_y));
-    
-    ImVec2 pos0 = ImVec2(    
-        lerp(frame_bb.Min.x ,frame_bb.Max.x, pData[2*0+0]),
-        lerp(frame_bb.Max.y, frame_bb.Min.y, ImSaturate((pData[2*0+1] - scale_min_y) * inv_scale_y))
-    );
 
-    for (int i = 1; i < values_count; i++)
+    std::vector<ImVec2> polyline_points;
+    polyline_points.reserve(static_cast<size_t>(values_count));
+
+    int current_pixel_x = -1;
+    for (int i = 0; i < values_count; i++)
     {
-        const ImVec2 pos1 = ImVec2(    
-            lerp(frame_bb.Min.x, frame_bb.Max.x, pData[2*i+0]),
-            lerp(frame_bb.Max.y, frame_bb.Min.y, ImSaturate((pData[2*i+1] - scale_min_y) * inv_scale_y))
-        );
-        window->DrawList->AddLine(pos0, pos1, col);
-        pos0 = pos1;
-        if (pos1.x>frame_bb.Max.x)
+        const ImVec2 pos = ImVec2(
+            lerp(frame_bb.Min.x, frame_bb.Max.x, pData[2 * i + 0]),
+            lerp(frame_bb.Max.y, frame_bb.Min.y, ImSaturate((pData[2 * i + 1] - scale_min_y) * inv_scale_y)));
+
+        if (pos.x > frame_bb.Max.x)
             break;
-    }    
+
+        const int pixel_x = static_cast<int>(pos.x);
+        if (!polyline_points.empty() && pixel_x == current_pixel_x)
+        {
+            // Collapse points that land on the same screen column to keep the spectrum
+            // visually identical while avoiding ImGui's 16-bit index overflow on 8192 FFT.
+            if (pos.y < polyline_points.back().y)
+                polyline_points.back() = pos;
+            continue;
+        }
+
+        polyline_points.push_back(pos);
+        current_pixel_x = pixel_x;
+    }
+
+    if (polyline_points.size() >= 2)
+        window->DrawList->AddPolyline(polyline_points.data(), static_cast<int>(polyline_points.size()), col, 0, 1.0f);
+    else if (polyline_points.size() == 1)
+        window->DrawList->AddCircleFilled(polyline_points[0], 1.5f, col);
 
     ImGui::PopClipRect();
 }

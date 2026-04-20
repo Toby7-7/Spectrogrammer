@@ -128,6 +128,7 @@ float gInputSampleRate = 48000.0f;
 float gEffectiveSampleRate = 48000.0f;
 int gRequestedInputChannels = 1;
 int gActiveInputChannels = 1;
+int gProcessingChannelCount = 1;
 int gDisplayChannelCount = 1;
 bool gInputChannelsFallbackActive = false;
 float gMinFreq = 0.0f;
@@ -318,9 +319,59 @@ int requested_input_channel_count_for_mode(InputChannelMode mode)
     return mode_requires_stereo(mode) ? 2 : 1;
 }
 
+int processing_channel_count_for_mode(InputChannelMode mode, int input_channels)
+{
+    if (input_channels < 2)
+        return 1;
+
+    if (mode == InputChannelMode::StereoDifference)
+        return 1;
+
+    if (mode == InputChannelMode::Mono)
+        return 1;
+
+    return 2;
+}
+
+bool mode_uses_stereo_difference(InputChannelMode mode, int input_channels)
+{
+    return input_channels >= 2 && mode == InputChannelMode::StereoDifference;
+}
+
+int processing_channel_count()
+{
+    return std::max(1, std::min(gProcessingChannelCount, kMaxInputChannels));
+}
+
+bool input_channel_mode_change_requires_restart(InputChannelMode from, InputChannelMode to)
+{
+    if (requested_input_channel_count_for_mode(from) != requested_input_channel_count_for_mode(to))
+        return true;
+
+    const int input_channels = active_input_channel_count();
+    return processing_channel_count_for_mode(from, input_channels) != processing_channel_count_for_mode(to, input_channels);
+}
+
 int display_channel_count()
 {
     return std::max(1, std::min(gDisplayChannelCount, kMaxInputChannels));
+}
+
+int mapped_left_source_channel()
+{
+    return stereo_input_available() ? 1 : 0;
+}
+
+int mapped_right_source_channel()
+{
+    return stereo_input_available() ? 0 : 0;
+}
+
+const char *mapped_source_channel_title(int source_channel)
+{
+    if (!stereo_input_available())
+        return "单声道";
+    return source_channel == mapped_left_source_channel() ? "左" : "右";
 }
 
 bool display_mode_is_split()
@@ -334,33 +385,22 @@ int display_source_channel(int display_channel)
         return 0;
 
     if (gConfig.input_channel_mode == InputChannelMode::Right)
-        return 1;
+        return mapped_right_source_channel();
 
     if (gConfig.input_channel_mode == InputChannelMode::StereoIndependent)
-        return gConfig.swap_stereo_order ? display_channel : (1 - display_channel);
+        return gConfig.swap_stereo_order
+                   ? (display_channel == 0 ? mapped_right_source_channel() : mapped_left_source_channel())
+                   : (display_channel == 0 ? mapped_left_source_channel() : mapped_right_source_channel());
 
     return 0;
 }
 
 const char *display_channel_title(int display_channel)
 {
-    if (!stereo_input_available())
-        return "单声道";
+    if (!display_mode_is_split())
+        return "";
 
-    switch (gConfig.input_channel_mode)
-    {
-    case InputChannelMode::Left:
-        return "左声道";
-    case InputChannelMode::Right:
-        return "右声道";
-    case InputChannelMode::StereoMixed:
-        return "双声道混合";
-    case InputChannelMode::StereoIndependent:
-        return display_source_channel(display_channel) == 0 ? "左声道" : "右声道";
-    case InputChannelMode::Mono:
-    default:
-        return "单声道";
-    }
+    return mapped_source_channel_title(display_source_channel(display_channel));
 }
 
 ImU32 display_channel_live_color(int display_channel)
@@ -368,11 +408,9 @@ ImU32 display_channel_live_color(int display_channel)
     if (!stereo_input_available())
         return IM_COL32(255, 212, 0, 240);
     if (display_mode_is_split())
-        return display_source_channel(display_channel) == 0 ? IM_COL32(255, 212, 0, 240) : IM_COL32(72, 192, 255, 240);
+        return display_source_channel(display_channel) == mapped_left_source_channel() ? IM_COL32(255, 212, 0, 240) : IM_COL32(72, 192, 255, 240);
     if (gConfig.input_channel_mode == InputChannelMode::Right)
         return IM_COL32(72, 192, 255, 240);
-    if (gConfig.input_channel_mode == InputChannelMode::StereoMixed)
-        return IM_COL32(120, 255, 170, 240);
     return IM_COL32(255, 212, 0, 240);
 }
 
@@ -381,11 +419,9 @@ ImU32 display_channel_peak_color(int display_channel)
     if (!stereo_input_available())
         return IM_COL32(220, 64, 64, 220);
     if (display_mode_is_split())
-        return display_source_channel(display_channel) == 0 ? IM_COL32(220, 64, 64, 220) : IM_COL32(64, 160, 220, 220);
+        return display_source_channel(display_channel) == mapped_left_source_channel() ? IM_COL32(220, 64, 64, 220) : IM_COL32(64, 160, 220, 220);
     if (gConfig.input_channel_mode == InputChannelMode::Right)
         return IM_COL32(64, 160, 220, 220);
-    if (gConfig.input_channel_mode == InputChannelMode::StereoMixed)
-        return IM_COL32(80, 220, 150, 220);
     return IM_COL32(220, 64, 64, 220);
 }
 
@@ -668,6 +704,21 @@ void average_buffers(const BufferIODouble &lhs, const BufferIODouble &rhs, Buffe
         out_data[i] = (lhs_data[i] + rhs_data[i]) * 0.5f;
 }
 
+float display_gain_linear()
+{
+    return powf(10.0f, clamp(gConfig.input_gain_db, -24.0f, 24.0f) / 20.0f);
+}
+
+void apply_gain_to_buffer(BufferIODouble *buffer, float gain_linear)
+{
+    if (buffer == nullptr || buffer->GetSize() <= 0 || fabsf(gain_linear - 1.0f) <= 1e-5f)
+        return;
+
+    float *data = buffer->GetData();
+    for (int i = 0; i < buffer->GetSize(); i++)
+        data[i] *= gain_linear;
+}
+
 void rebuild_display_channels_locked()
 {
     clear_display_channels_locked();
@@ -675,12 +726,16 @@ void rebuild_display_channels_locked()
     if (channel_state(0).live_power_raw.GetSize() <= 0)
         return;
 
+    const float gain_linear = display_gain_linear();
+
     if (!stereo_input_available())
     {
         display_channel_state(0).live_power_raw.copy(&channel_state(0).live_power_raw);
+        apply_gain_to_buffer(&display_channel_state(0).live_power_raw, gain_linear);
         if (channel_state(0).peak_hold_valid)
         {
             display_channel_state(0).peak_hold_raw.copy(&channel_state(0).peak_hold_raw);
+            apply_gain_to_buffer(&display_channel_state(0).peak_hold_raw, gain_linear);
             display_channel_state(0).peak_hold_valid = true;
         }
         gDisplayChannelCount = 1;
@@ -692,11 +747,15 @@ void rebuild_display_channels_locked()
     case InputChannelMode::Left:
     case InputChannelMode::Right:
     {
-        const int source_channel = gConfig.input_channel_mode == InputChannelMode::Right ? 1 : 0;
+        const int source_channel = gConfig.input_channel_mode == InputChannelMode::Right
+                                       ? mapped_right_source_channel()
+                                       : mapped_left_source_channel();
         display_channel_state(0).live_power_raw.copy(&channel_state(source_channel).live_power_raw);
+        apply_gain_to_buffer(&display_channel_state(0).live_power_raw, gain_linear);
         if (channel_state(source_channel).peak_hold_valid)
         {
             display_channel_state(0).peak_hold_raw.copy(&channel_state(source_channel).peak_hold_raw);
+            apply_gain_to_buffer(&display_channel_state(0).peak_hold_raw, gain_linear);
             display_channel_state(0).peak_hold_valid = true;
         }
         gDisplayChannelCount = 1;
@@ -704,9 +763,22 @@ void rebuild_display_channels_locked()
     }
     case InputChannelMode::StereoMixed:
         average_buffers(channel_state(0).live_power_raw, channel_state(1).live_power_raw, &display_channel_state(0).live_power_raw);
+        apply_gain_to_buffer(&display_channel_state(0).live_power_raw, gain_linear);
         if (channel_state(0).peak_hold_valid && channel_state(1).peak_hold_valid)
         {
             average_buffers(channel_state(0).peak_hold_raw, channel_state(1).peak_hold_raw, &display_channel_state(0).peak_hold_raw);
+            apply_gain_to_buffer(&display_channel_state(0).peak_hold_raw, gain_linear);
+            display_channel_state(0).peak_hold_valid = true;
+        }
+        gDisplayChannelCount = 1;
+        break;
+    case InputChannelMode::StereoDifference:
+        display_channel_state(0).live_power_raw.copy(&channel_state(0).live_power_raw);
+        apply_gain_to_buffer(&display_channel_state(0).live_power_raw, gain_linear);
+        if (channel_state(0).peak_hold_valid)
+        {
+            display_channel_state(0).peak_hold_raw.copy(&channel_state(0).peak_hold_raw);
+            apply_gain_to_buffer(&display_channel_state(0).peak_hold_raw, gain_linear);
             display_channel_state(0).peak_hold_valid = true;
         }
         gDisplayChannelCount = 1;
@@ -716,9 +788,11 @@ void rebuild_display_channels_locked()
         {
             const int source_channel = display_source_channel(display_channel);
             display_channel_state(display_channel).live_power_raw.copy(&channel_state(source_channel).live_power_raw);
+            apply_gain_to_buffer(&display_channel_state(display_channel).live_power_raw, gain_linear);
             if (channel_state(source_channel).peak_hold_valid)
             {
                 display_channel_state(display_channel).peak_hold_raw.copy(&channel_state(source_channel).peak_hold_raw);
+                apply_gain_to_buffer(&display_channel_state(display_channel).peak_hold_raw, gain_linear);
                 display_channel_state(display_channel).peak_hold_valid = true;
             }
         }
@@ -727,9 +801,11 @@ void rebuild_display_channels_locked()
     case InputChannelMode::Mono:
     default:
         display_channel_state(0).live_power_raw.copy(&channel_state(0).live_power_raw);
+        apply_gain_to_buffer(&display_channel_state(0).live_power_raw, gain_linear);
         if (channel_state(0).peak_hold_valid)
         {
             display_channel_state(0).peak_hold_raw.copy(&channel_state(0).peak_hold_raw);
+            apply_gain_to_buffer(&display_channel_state(0).peak_hold_raw, gain_linear);
             display_channel_state(0).peak_hold_valid = true;
         }
         gDisplayChannelCount = 1;
@@ -964,6 +1040,7 @@ void stop_processing_session()
         }
         Audio_deinit();
     }
+    gProcessingChannelCount = 1;
     gProcessingThreadStop.store(false);
 }
 
@@ -974,9 +1051,14 @@ void processing_loop()
         int processed_frames = 0;
         {
             std::lock_guard<std::mutex> lock(gStateMutex);
-            while (gProcessors[0] != nullptr && gChunker.Process(gProcessors, active_input_channel_count(), gHopSamples))
+            while (gProcessors[0] != nullptr &&
+                   gChunker.Process(
+                       gProcessors,
+                       processing_channel_count(),
+                       gHopSamples,
+                       mode_uses_stereo_difference(gConfig.input_channel_mode, active_input_channel_count())))
             {
-                for (int channel = 0; channel < active_input_channel_count(); channel++)
+                for (int channel = 0; channel < processing_channel_count(); channel++)
                 {
                     SharedState::ChannelState &state = channel_state(channel);
                     gProcessors[channel]->computePower(gConfig.exponential_smoothing_factor);
@@ -1056,6 +1138,7 @@ void start_processing_session()
     const int preferred_sample_rate = configured_sample_rate();
     gRequestedInputChannels = preferred_input_channel_count();
     gActiveInputChannels = 1;
+    gProcessingChannelCount = 1;
     gDisplayChannelCount = 1;
     gInputChannelsFallbackActive = false;
     bool audio_started = false;
@@ -1105,13 +1188,14 @@ void start_processing_session()
     Audio_getBufferQueues(&pFreeQueue, &pRecQueue);
     gChunker.SetQueues(pRecQueue, pFreeQueue, gActiveInputChannels);
     gChunker.begin();
+    gProcessingChannelCount = processing_channel_count_for_mode(gConfig.input_channel_mode, gActiveInputChannels);
 
     for (int channel = 0; channel < kMaxInputChannels; channel++)
     {
         delete gProcessors[channel];
         gProcessors[channel] = nullptr;
     }
-    for (int channel = 0; channel < active_input_channel_count(); channel++)
+    for (int channel = 0; channel < processing_channel_count(); channel++)
     {
         gProcessors[channel] = new myFFT();
         gProcessors[channel]->init(gConfig.fft_size, gInputSampleRate, GetDecimationFactor(gConfig), gConfig.window_function);
@@ -1121,13 +1205,13 @@ void start_processing_session()
     if (gFrequencyPlotWidth > 0)
         rebuild_scale_locked(gFrequencyPlotWidth);
 
-    for (int channel = 0; channel < active_input_channel_count(); channel++)
+    for (int channel = 0; channel < processing_channel_count(); channel++)
     {
         channel_state(channel).live_power_raw.Resize(gProcessors[channel]->getBinCount());
         channel_state(channel).live_power_raw.clear();
         channel_state(channel).live_line.Resize(0);
     }
-    for (int channel = active_input_channel_count(); channel < kMaxInputChannels; channel++)
+    for (int channel = processing_channel_count(); channel < kMaxInputChannels; channel++)
     {
         channel_state(channel).live_power_raw.Resize(0);
         channel_state(channel).live_line.Resize(0);
@@ -1241,10 +1325,20 @@ const char *input_channel_label(InputChannelMode mode)
         return "只看右声道";
     case InputChannelMode::StereoMixed:
         return "双声道混合";
+    case InputChannelMode::StereoDifference:
+        return "双声道相减";
     case InputChannelMode::StereoIndependent:
     default:
         return "双声道独立";
     }
+}
+
+const char *input_gain_label(float gain_db)
+{
+    static char buffer[48];
+    const float gain_linear = powf(10.0f, clamp(gain_db, -24.0f, 24.0f) / 20.0f);
+    snprintf(buffer, sizeof(buffer), "%+.1f dB（%.2fx）", gain_db, gain_linear);
+    return buffer;
 }
 
 const char *runtime_input_channel_status_label()
@@ -1513,6 +1607,7 @@ void render_settings_page()
             InputChannelMode::Left,
             InputChannelMode::Right,
             InputChannelMode::StereoMixed,
+            InputChannelMode::StereoDifference,
             InputChannelMode::StereoIndependent,
         };
         for (InputChannelMode mode : items)
@@ -1520,8 +1615,7 @@ void render_settings_page()
             const bool selected = gConfig.input_channel_mode == mode;
             if (ImGui::Selectable(input_channel_label(mode), selected))
             {
-                const bool requires_restart = requested_input_channel_count_for_mode(gConfig.input_channel_mode) !=
-                                              requested_input_channel_count_for_mode(mode);
+                const bool requires_restart = input_channel_mode_change_requires_restart(gConfig.input_channel_mode, mode);
                 gConfig.input_channel_mode = mode;
                 mark_config_dirty();
                 if (requires_restart)
@@ -1546,6 +1640,17 @@ void render_settings_page()
             apply_display_change(false, true);
         }
     }
+
+    render_setting_label("输入增益");
+    float input_gain_db = gConfig.input_gain_db;
+    set_full_width_item();
+    if (ImGui::SliderFloat("##input_gain_db", &input_gain_db, -24.0f, 24.0f, "%.1f dB"))
+    {
+        gConfig.input_gain_db = roundf(input_gain_db * 2.0f) * 0.5f;
+        mark_config_dirty();
+        apply_display_change(false, false);
+    }
+    ImGui::TextDisabled("负值减小，正值放大：%s", input_gain_label(gConfig.input_gain_db));
 
     render_setting_label("采样率");
     set_full_width_item();
@@ -1862,7 +1967,7 @@ void draw_toolbar()
 
     const float row_height = std::max(68.0f, large_button_height() * 0.76f);
     const float width = ImGui::GetContentRegionAvail().x;
-    const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+    const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * 3.0f) / 4.0f;
 
     if (ImGui::Button(gDisplayPaused ? "继续" : "暂停", ImVec2(button_width, row_height)))
         gDisplayPaused = !gDisplayPaused;
@@ -1874,6 +1979,16 @@ void draw_toolbar()
         clear_peak_hold_locked();
         refresh_display_state_locked(false);
     }
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!gCursorActive);
+    if (ImGui::Button("清除游标", ImVec2(button_width, row_height)))
+    {
+        std::lock_guard<std::mutex> lock(gStateMutex);
+        gCursorActive = false;
+        gCursorDragging = false;
+    }
+    ImGui::EndDisabled();
 
     ImGui::SameLine();
     if (ImGui::Button("设置", ImVec2(button_width, row_height)))
@@ -2026,7 +2141,7 @@ void draw_peak_markers(const ImRect &frame_bb)
             char freq[48];
             format_frequency(freq, sizeof(freq), marker.freq_hz);
             if (display_mode_is_split())
-                snprintf(label, sizeof(label), "%s %s\n%.0f dB", display_source_channel(channel) == 0 ? "左" : "右", freq, marker.value_db);
+                snprintf(label, sizeof(label), "%s %s\n%.0f dB", mapped_source_channel_title(display_source_channel(channel)), freq, marker.value_db);
             else
                 snprintf(label, sizeof(label), "%s\n%.0f dB", freq, marker.value_db);
             const ImVec2 label_size = calc_overlay_text_size(label);
@@ -2050,8 +2165,9 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int
     format_frequency(freqLabel, sizeof(freqLabel), gCursorFrequencyHz);
     for (int channel = 0; channel < display_channel_count(); channel++)
     {
-        if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
-            snprintf(dbLabels[channel], sizeof(dbLabels[channel]), "%s %.1f dB", display_channel_title(channel), gCursorDb[channel]);
+        const char *channel_label = display_channel_title(channel);
+        if (channel_label != nullptr && channel_label[0] != '\0')
+            snprintf(dbLabels[channel], sizeof(dbLabels[channel]), "%s %.1f dB", channel_label, gCursorDb[channel]);
         else
             snprintf(dbLabels[channel], sizeof(dbLabels[channel]), "%.1f dB", gCursorDb[channel]);
     }
@@ -2110,12 +2226,12 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int
     ImGui::GetWindowDrawList()->AddRectFilled(
         ImVec2(boxX, boxY),
         ImVec2(boxX + boxWidth, boxY + boxHeight),
-        IM_COL32(10, 18, 26, 210),
+        IM_COL32(10, 18, 26, 150),
         6.0f);
     ImGui::GetWindowDrawList()->AddRect(
         ImVec2(boxX, boxY),
         ImVec2(boxX + boxWidth, boxY + boxHeight),
-        IM_COL32(70, 255, 180, 140),
+        IM_COL32(70, 255, 180, 110),
         6.0f);
     ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), font_size, ImVec2(boxX + 8.0f, boxY + 5.0f), apply_overlay_text_alpha(cursorColor), freqLabel);
     float textY = boxY + 9.0f + freqSize.y;
@@ -2161,13 +2277,15 @@ void draw_spectrum(const ImRect &frame_bb)
     draw_scale_y(frame_bb, gAxisYMin, gAxisYMax);
     draw_peak_markers(frame_bb);
 
-    if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
+    if (display_mode_is_split())
     {
         float legend_x = frame_bb.Min.x + 10.0f;
         const float font_size = overlay_text_font_size();
         for (int channel = 0; channel < display_channel_count(); channel++)
         {
             const char *label = display_channel_title(channel);
+            if (label == nullptr || label[0] == '\0')
+                continue;
             ImGui::GetWindowDrawList()->AddText(
                 ImGui::GetFont(),
                 font_size,
@@ -2251,9 +2369,11 @@ void render_main_screen()
 
         Draw_waterfall(channel, waterfallFrames[channel]);
         Draw_vertical_scale(waterfallFrames[channel], gWaterfallSecondsPerRow);
-        if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
+        if (display_mode_is_split())
         {
             const char *label = display_channel_title(channel);
+            if (label == nullptr || label[0] == '\0')
+                continue;
             ImGui::GetWindowDrawList()->AddText(
                 ImGui::GetFont(),
                 overlay_text_font_size(),

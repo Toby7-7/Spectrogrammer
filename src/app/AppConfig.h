@@ -20,6 +20,7 @@ enum class InputChannelMode
     Right = 2,
     StereoMixed = 3,
     StereoIndependent = 4,
+    StereoDifference = 5,
 };
 
 enum class SamplingRateMode
@@ -77,6 +78,7 @@ struct AppConfig
     InputChannelMode input_channel_mode;
     SamplingRateMode sampling_rate_mode;
     int sample_rate_hz;
+    float input_gain_db;
     int fft_size;
     int decimations;
     WindowFunctionType window_function;

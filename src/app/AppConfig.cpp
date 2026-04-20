@@ -10,7 +10,7 @@
 
 namespace
 {
-constexpr int kConfigVersion = 9;
+constexpr int kConfigVersion = 10;
 
 void migrate_config(AppConfig *config)
 {
@@ -81,6 +81,12 @@ void migrate_config(AppConfig *config)
     {
         config->overlay_text_scale = 1.0f;
         config->overlay_text_alpha = 0.82f;
+        config->version = 9;
+    }
+
+    if (config->version < 10)
+    {
+        config->input_gain_db = 0.0f;
         config->version = kConfigVersion;
     }
 }
@@ -121,6 +127,7 @@ AppConfig MakeDefaultAppConfig()
     config.input_channel_mode = InputChannelMode::StereoIndependent;
     config.sampling_rate_mode = SamplingRateMode::Auto;
     config.sample_rate_hz = 48000;
+    config.input_gain_db = 0.0f;
     config.fft_size = 4096;
     config.decimations = 0;
     config.window_function = WindowFunctionType::BlackmanHarris;
@@ -171,6 +178,8 @@ bool LoadAppConfig(const char *path, AppConfig *config)
             loaded.sampling_rate_mode = static_cast<SamplingRateMode>(atoi(value));
         else if (strcmp(key, "sample_rate_hz") == 0)
             loaded.sample_rate_hz = atoi(value);
+        else if (strcmp(key, "input_gain_db") == 0)
+            loaded.input_gain_db = strtof(value, nullptr);
         else if (strcmp(key, "fft_size") == 0)
             loaded.fft_size = atoi(value);
         else if (strcmp(key, "decimations") == 0)
@@ -221,10 +230,14 @@ bool LoadAppConfig(const char *path, AppConfig *config)
     if (loaded.sample_rate_hz <= 0)
         loaded.sample_rate_hz = 48000;
     if ((int)loaded.input_channel_mode < (int)InputChannelMode::Mono ||
-        (int)loaded.input_channel_mode > (int)InputChannelMode::StereoIndependent)
+        (int)loaded.input_channel_mode > (int)InputChannelMode::StereoDifference)
         loaded.input_channel_mode = InputChannelMode::StereoIndependent;
     if (loaded.sample_rate_hz > 192000)
         loaded.sample_rate_hz = 192000;
+    if (loaded.input_gain_db < -24.0f)
+        loaded.input_gain_db = -24.0f;
+    if (loaded.input_gain_db > 24.0f)
+        loaded.input_gain_db = 24.0f;
     if (loaded.fft_size < 128)
         loaded.fft_size = 1024;
     if (loaded.decimations < 0)
@@ -281,6 +294,7 @@ bool SaveAppConfig(const char *path, const AppConfig &config)
     fprintf(file, "input_channel_mode=%d\n", static_cast<int>(config.input_channel_mode));
     fprintf(file, "sampling_rate_mode=%d\n", static_cast<int>(config.sampling_rate_mode));
     fprintf(file, "sample_rate_hz=%d\n", config.sample_rate_hz);
+    fprintf(file, "input_gain_db=%.6f\n", config.input_gain_db);
     fprintf(file, "fft_size=%d\n", config.fft_size);
     fprintf(file, "decimations=%d\n", config.decimations);
     fprintf(file, "window_function=%d\n", static_cast<int>(config.window_function));

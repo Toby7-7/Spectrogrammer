@@ -52,6 +52,19 @@ public:
         }
     }
 
+    void convertFloatToFFT(const float *input, int offsetDest, int length)
+    {
+        assert(m_pInput_samples.GetSize() >= offsetDest + length);
+
+        float *m_in_samples = m_pInput_samples.GetData();
+        for (int i = 0; i < length; i++)
+        {
+            const int ii = i + offsetDest;
+            assert(ii < m_pInput_samples.GetSize());
+            m_in_samples[ii] = input[i];
+        }
+    }
+
     void computePower(float decay)
     {
         float *out = m_pOutput_data.GetData();
