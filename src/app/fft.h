@@ -8,6 +8,8 @@
 
 float hanning(int i, int window_size);
 float hamming(int i, int window_size);
+float blackman_harris(int i, int window_size);
+float apply_window(WindowFunctionType windowFunction, int i, int window_size);
 
 class myFFT : public Processor
 {
@@ -21,6 +23,8 @@ class myFFT : public Processor
     float m_fftScaling;
     float m_sampleRate;
     float m_freq_resolution;
+    int m_decimationFactor = 1;
+    WindowFunctionType m_windowFunction = WindowFunctionType::Hann;
 
     void init(int nfft)
     { 
@@ -35,7 +39,7 @@ class myFFT : public Processor
 
         m_fftScaling = 0;
         for(int i=0;i<m_pInput_samples.GetSize();i++)
-            m_fftScaling+=hanning(i, m_pInput_samples.GetSize());
+            m_fftScaling += apply_window(m_windowFunction, i, m_pInput_samples.GetSize());
     }
 
     void deinit()
@@ -51,30 +55,34 @@ public:
 
     virtual const char *GetName() const {  return "FFT"; };
 
-    void init(int nfft, float sampleRate)
+    void init(int nfft, float sampleRate, int decimationFactor, WindowFunctionType windowFunction)
     {
+        m_decimationFactor = decimationFactor;
+        m_windowFunction = windowFunction;
         init(nfft);
         m_sampleRate = sampleRate;
-        m_freq_resolution = sampleRate / nfft;
+        m_freq_resolution = (sampleRate / (float)m_decimationFactor) / nfft;
     }
 
     int getBinCount() const { return m_pOutput_bins.GetSize(); }
 
-    int getProcessedLength() const { return m_pInput_samples.GetSize(); }
+    int getProcessedLength() const { return m_pInput_samples.GetSize() * m_decimationFactor; }
 
     void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length)
     {
-        assert(m_pInput_samples.GetSize()>=offsetDest+length);
-
         float *m_in_samples = m_pInput_samples.GetData();
         for (int i = 0; i < length; i++)
         {
+            int raw_index = i + offsetDest;
+            if ((raw_index % m_decimationFactor) != 0)
+                continue;
+
+            int ii = raw_index / m_decimationFactor;
+            if (ii >= m_pInput_samples.GetSize())
+                break;
+
             float val = Uint16ToFloat(&input[i]);
-
-            int ii= i + offsetDest;
-            val *= hanning(ii, m_pInput_samples.GetSize());
-
-            assert(ii < m_pInput_samples.GetSize());
+            val *= apply_window(m_windowFunction, ii, m_pInput_samples.GetSize());
             m_in_samples[ii] = val;
         }
     }

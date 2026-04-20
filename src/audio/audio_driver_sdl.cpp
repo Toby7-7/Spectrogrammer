@@ -16,7 +16,8 @@ static int32_t buffer_frames = 1024;
 static bool recording = false;
 static pthread_t capture_thread;
 
-void Audio_init(unsigned int sampleRate, int framesPerBuf) {
+bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset) {
+    (void)recordingPreset;
     SDL_Init(SDL_INIT_AUDIO);
 
     SDL_AudioSpec desired, obtained;
@@ -30,7 +31,7 @@ void Audio_init(unsigned int sampleRate, int framesPerBuf) {
     audioDevice = SDL_OpenAudioDevice(NULL, 1, &desired, &obtained, 0);
     if (audioDevice == 0) {
         fprintf(stderr, "Failed to open audio device: %s\n", SDL_GetError());
-        exit(1);
+        return false;
     }
 
     uint32_t bufSize = buffer_frames * 2;  // mono 16-bit samples
@@ -44,6 +45,7 @@ void Audio_init(unsigned int sampleRate, int framesPerBuf) {
     }
 
     SDL_PauseAudioDevice(audioDevice, 0);  // Start recording
+    return true;
 }
 
 void Audio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ) {
@@ -68,9 +70,10 @@ static void* capture_thread_fn(void *v) {
     return NULL;
 }
 
-void Audio_startPlay() {
+bool Audio_startPlay() {
     recording = true;
     pthread_create(&capture_thread, NULL, capture_thread_fn, NULL);
+    return true;
 }
 
 void Audio_deinit() {

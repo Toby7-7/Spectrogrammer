@@ -4,122 +4,151 @@
 
 #include "imgui.h"
 #include "imgui_internal.h"
-//#include "backends/imgui_impl_android.h"
 #include "backends/imgui_impl_opengl3.h"
-//#include "android_native_app_glue.h"
-//#include <android/asset_manager.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
-#include <stdlib.h>
 #include <math.h>
-#include "waterfall.h"
+#include <stdlib.h>
+
+#include <cstring>
+#include <vector>
+
 #include "colormaps.h"
+#include "waterfall.h"
 
-// some helper functions
-
+namespace
+{
 void calc_scale(float seconds_per_row, float desired_distance, float *notch_distance, float *scale)
 {
     *notch_distance = desired_distance;
     *scale = 1;
 
     float min_err = 10000;
-    float scale_list[] = {1.0f/20.0f, 1.0f/10.0f, 1.0f/2.0f, 1.0f, 3.0f, 4.0f, 10.0f, 30.0f, 60.0f, 120.0f, 300.0f, 600.0f, 1200.0f, 3600.0f};
-    for (int i=0;i<14;i++)
-    {        
-        float nd = scale_list[i]/seconds_per_row;
+    float scale_list[] = {1.0f / 20.0f, 1.0f / 10.0f, 1.0f / 2.0f, 1.0f, 3.0f, 4.0f, 10.0f, 30.0f, 60.0f, 120.0f, 300.0f, 600.0f, 1200.0f, 3600.0f};
+    for (int i = 0; i < 14; i++)
+    {
+        float nd = scale_list[i] / seconds_per_row;
         float err = fabs(nd - desired_distance);
-        if (err<min_err)
+        if (err < min_err)
             min_err = err;
-        if (err>min_err)
+        if (err > min_err)
             break;
         *notch_distance = nd;
         *scale = scale_list[i];
     }
 }
 
-float get_time_magnitude(float total_time)
+int get_time_magnitude(float total_time)
 {
-    // find time magnitude
-    int time_magnitude = -1;
-    if (total_time>60*60)
-        time_magnitude=3;
-    else if (total_time>60)
-        time_magnitude=2;
-    else if (total_time>20)
-        time_magnitude=1;
-    else 
-        time_magnitude=0;
-
-    return time_magnitude;
+    if (total_time > 60 * 60)
+        return 3;
+    if (total_time > 60)
+        return 2;
+    if (total_time > 20)
+        return 1;
+    return 0;
 }
-
 
 static int texture_width = -1;
 static int texture_height = -1;
 static GLuint image_texture = 0xffffffff;
-static int offset = 0;
+static std::vector<uint16_t> image_storage;
+static std::vector<uint16_t> row_scratch;
+static bool texture_dirty = false;
+
+void ensure_texture()
+{
+    if (texture_width <= 0 || texture_height <= 0)
+        return;
+
+    if (image_texture == 0xffffffff)
+    {
+        glGenTextures(1, &image_texture);
+        glBindTexture(GL_TEXTURE_2D, image_texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, texture_width, texture_height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, image_storage.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+        texture_dirty = false;
+        return;
+    }
+
+    if (texture_dirty)
+    {
+        glBindTexture(GL_TEXTURE_2D, image_texture);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texture_width, texture_height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, image_storage.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+        texture_dirty = false;
+    }
+}
+}
 
 void Init_waterfall(int16_t width, int16_t height)
 {
+    if (width <= 0 || height <= 0)
+        return;
+
+    const int old_width = texture_width;
+    const int old_height = texture_height;
+    const std::vector<uint16_t> old_storage = image_storage;
+    const bool resized = texture_width != width || texture_height != height;
     texture_width = width;
     texture_height = height;
 
-    // Create a OpenGL texture identifier
-    glGenTextures(1, &image_texture);
-    glBindTexture(GL_TEXTURE_2D, image_texture);
-
-    // Setup filtering parameters for display
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-    uint16_t* image_data = (uint16_t*)malloc(texture_width * texture_height * 2);
-    if (image_data!=NULL)
+    if (resized || image_storage.size() != static_cast<size_t>(texture_width * texture_height))
     {
-        
-        for (int y=0;y<texture_height;y++)
+        image_storage.assign(static_cast<size_t>(texture_width) * static_cast<size_t>(texture_height), 0);
+
+        if (resized && old_width > 0 && old_height > 0 && !old_storage.empty())
         {
-            for (int x=0;x<texture_width;x++)
+            const int copy_width = old_width < texture_width ? old_width : texture_width;
+            const int copy_height = old_height < texture_height ? old_height : texture_height;
+
+            for (int y = 0; y < copy_height; y++)
             {
-                image_data[x+y*texture_width] = 0;
+                memcpy(
+                    &image_storage[static_cast<size_t>(y) * static_cast<size_t>(texture_width)],
+                    &old_storage[static_cast<size_t>(y) * static_cast<size_t>(old_width)],
+                    sizeof(uint16_t) * static_cast<size_t>(copy_width));
             }
         }
 
-        // Upload pixels into texture
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, texture_width, texture_height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, image_data);   
-        glFlush();
-        free(image_data);
+        texture_dirty = true;
     }
-}
 
-void update_texture_row(uint16_t *image_data)
-{
-    glBindTexture(GL_TEXTURE_2D, image_texture);
-    glTexSubImage2D(GL_TEXTURE_2D,
-        0,
-        0,
-        offset,
-        texture_width,
-        1, //height
-        GL_RGB, GL_UNSIGNED_SHORT_5_6_5, image_data);    
-    glBindTexture(GL_TEXTURE_2D, 0);
+    if (resized && image_texture != 0xffffffff)
+    {
+        glDeleteTextures(1, &image_texture);
+        image_texture = 0xffffffff;
+    }
 
-    offset--;
-    if (offset<0)
-        offset = texture_height-1;
+    ensure_texture();
 }
 
 void Draw_update(float *pData, uint32_t size)
 {
-    if (image_texture==0xffffffff)
+    if (texture_width <= 0 || texture_height <= 0 || pData == nullptr || size == 0)
         return;
 
-    uint16_t image_data[4*1024];
-    for(int i=0;i<texture_width;i++)
+    row_scratch.assign(static_cast<size_t>(texture_width), 0);
+    for (int i = 0; i < texture_width; i++)
     {
-        image_data[i] = GetColorMap(pData[i] *255);
+        const uint32_t source_index = static_cast<uint32_t>((static_cast<uint64_t>(i) * size) / static_cast<uint32_t>(texture_width));
+        const uint32_t clamped_index = source_index < size ? source_index : size - 1;
+        row_scratch[static_cast<size_t>(i)] = GetColorMap(pData[clamped_index] * 255);
     }
 
-    update_texture_row(image_data);
+    if (texture_height > 1)
+    {
+        memmove(
+            &image_storage[static_cast<size_t>(texture_width)],
+            &image_storage[0],
+            sizeof(uint16_t) * static_cast<size_t>(texture_width) * static_cast<size_t>(texture_height - 1));
+    }
+    memcpy(&image_storage[0], row_scratch.data(), sizeof(uint16_t) * static_cast<size_t>(texture_width));
+    texture_dirty = true;
 }
 
 void Draw_waterfall(ImRect frame_bb)
@@ -128,36 +157,10 @@ void Draw_waterfall(ImRect frame_bb)
     if (window->SkipItems)
         return;
 
-    if (image_texture==0xffffffff)
+    ensure_texture();
+    if (image_texture == 0xffffffff)
         return;
-
-    float foffset = offset/(float)(texture_height-1);
-
-    window->DrawList->AddImage((ImTextureID)image_texture, frame_bb.Min, ImVec2(frame_bb.Max.x, frame_bb.Max.y - offset), ImVec2(0,foffset), ImVec2(1,1), IM_COL32_WHITE);
-    window->DrawList->AddImage((ImTextureID)image_texture, ImVec2(frame_bb.Min.x, frame_bb.Max.y - offset), frame_bb.Max, ImVec2(0,0), ImVec2(1,foffset), IM_COL32_WHITE);
-}
-
-void Draw_hover_data(ImRect frame_bb, bool hovered)
-{
-    ImGuiContext& g = *GImGui;
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window->SkipItems)
-        return;
-
-    ImU32 col = IM_COL32(200, 200, 200, 200);
-
-    // Tooltip on hover
-    if (hovered && frame_bb.Contains(g.IO.MousePos))
-    {
-        window->DrawList->AddLine(
-            ImVec2(g.IO.MousePos.x, frame_bb.Min.y),
-            ImVec2(g.IO.MousePos.x, frame_bb.Max.y),
-            col);
-
-        char str[255];
-        sprintf(str, "%f Hz", g.IO.MousePos.x - frame_bb.Min.x); 
-        window->DrawList->AddText(ImVec2(g.IO.MousePos.x, frame_bb.Min.y), col, str);
-    }
+    window->DrawList->AddImage((ImTextureID)image_texture, frame_bb.Min, frame_bb.Max, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE);
 }
 
 void Draw_vertical_scale(ImRect frame_bb, float seconds_per_row)
@@ -166,62 +169,70 @@ void Draw_vertical_scale(ImRect frame_bb, float seconds_per_row)
     if (window->SkipItems)
         return;
 
-    //window.pos 
-
-
     ImU32 col = IM_COL32(200, 200, 200, 200);
 
-    // calculate scale
     float scale;
     float notch_distance;
     float desired_distance = 25;
     calc_scale(seconds_per_row, desired_distance, &notch_distance, &scale);
-    
-    // find time magnitude
-    float total_time = seconds_per_row * texture_height;
+
+    float total_time = seconds_per_row * static_cast<float>(texture_height);
     int time_magnitude = get_time_magnitude(total_time);
 
-    // draw time scale
-    for(int i=0;;i++)
+    for (int i = 0;; i++)
     {
         float y = floor((float)i * notch_distance);
-        if (y>=texture_height)
+        if (y >= texture_height)
             break;
 
-        bool long_notch = (i % 5)==0;
+        bool long_notch = (i % 5) == 0;
 
         window->DrawList->AddLine(
             ImVec2(frame_bb.Min.x, frame_bb.Min.y + y),
-            ImVec2(frame_bb.Min.x + (long_notch?50:25), frame_bb.Min.y + y),
+            ImVec2(frame_bb.Min.x + (long_notch ? 50 : 25), frame_bb.Min.y + y),
             col);
-        
+
         if (long_notch)
         {
             char str[255];
-            int t = floor(i*scale);
-            switch(time_magnitude)
+            int t = static_cast<int>(floor(i * scale));
+            switch (time_magnitude)
             {
-                case 0: sprintf(str, "%0.2fs", i*scale); break;
-                case 1: sprintf(str, "%02is", t % 60); break;
-                case 2: sprintf(str, "%im%02is", t/60, t % 60); break;
-                case 3: sprintf(str, "%ih%02im", t/(60*60), (t%(60*60)) / 60); break;
+            case 0:
+                sprintf(str, "%0.2fs", i * scale);
+                break;
+            case 1:
+                sprintf(str, "%02is", t % 60);
+                break;
+            case 2:
+                sprintf(str, "%im%02is", t / 60, t % 60);
+                break;
+            case 3:
+            default:
+                sprintf(str, "%ih%02im", t / (60 * 60), (t % (60 * 60)) / 60);
+                break;
             }
 
             window->DrawList->AddText(ImVec2(frame_bb.Min.x + 50, frame_bb.Min.y + y), col, str);
         }
-
-    }    
+    }
 }
 
 void Shutdown_waterfall()
 {
     glFlush();
-    if (image_texture!=0xffffffff)
+    if (image_texture != 0xffffffff)
     {
         glDeleteTextures(1, &image_texture);
         image_texture = 0xffffffff;
-        texture_width = -1;
-        texture_height = -1;
-        offset = 0;
+    }
+}
+
+void Reset_waterfall_storage()
+{
+    if (!image_storage.empty())
+    {
+        std::fill(image_storage.begin(), image_storage.end(), 0);
+        texture_dirty = true;
     }
 }

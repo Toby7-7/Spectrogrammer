@@ -4,12 +4,13 @@
 #define _USE_MATH_DEFINES
 #include "auformat.h"
 #include "BufferIO.h"
+#include "AppConfig.h"
 
 class Processor
 {
 public:
     virtual ~Processor() { };
-    virtual void init(int length, float sampleRate) = 0;
+    virtual void init(int length, float sampleRate, int decimationFactor, WindowFunctionType windowFunction) = 0;
     virtual const char *GetName() const = 0;
 
     virtual int getProcessedLength() const = 0;

@@ -1,21 +1,14 @@
-<i>Spectrogrammer</i> helps you analyze audio and vibrations, you can spot issues, tune instruments and identify noises byt their footprint.
+Spectrogrammer 是一个以 Android 手机触控为主的实时频谱分析器，也保留 Linux 构建能力。
 
-<br><b>Features:</b>
+主要功能：
+- 实时频谱曲线和瀑布图
+- 线性 / 普通对数 / 音乐对数 / Mel / Bark / ERB 频率刻度
+- 峰值保持曲线、峰值标记和可调回落
+- 手动游标线，显示当前位置频率与 dB
+- 双指缩放和平移查看局部频段
+- 可调音频源、采样率、FFT 大小、抽取级数、窗函数、滚动速度和平滑因子
+- 支持后台采集与保持亮屏
 
-- Runs on Android and Linux
-- Frequency analysis
-  - 4096 bands FFT
-  - configurable
-    - decay
-    - averaging
-- Visualization
-  - Spectrogram
-  - Waterfall
-  - Uses a magma heatmap
-  - When hold is active a binary heatmap is used to shows above/below values
-        Linear / Log scales for both axis
-  - Hold function to capture refrence levels
-  - Save/load/delete/rename for comparing
-- High performance, developed entirely in C/C++
-- Multiplatform, runs also on linux
-
+说明：
+- 高采样率档位是否可用取决于设备和驱动。
+- APK 主要面向本地安装与调试。

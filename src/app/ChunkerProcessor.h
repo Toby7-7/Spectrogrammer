@@ -1,3 +1,5 @@
+#pragma once
+
 #include "Processor.h"
 #define LOGW(...)
 #include "buf_manager.h"
@@ -22,10 +24,10 @@ class ChunkerProcessor
     }
 
 public:
-
     void begin();
     void end();
     void SetQueues(AudioQueue *pRecQueue, AudioQueue *pFreeQueue);
     bool releaseUsedAudioChunks();
-    bool Process(Processor *pSpectrum, double decay, double fractionOverlap);
+    void releaseAllAudioChunks();
+    bool Process(Processor *pSpectrum, int hopSamples);
 };

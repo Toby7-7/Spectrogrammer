@@ -1,1 +1,1 @@
-Fast Sound Spectrum Analyzer
+中文优先的实时频谱分析器，支持瀑布图、峰值保持和触控缩放

@@ -33,8 +33,9 @@ static snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
 static bool recording = false;
 static pthread_t debug_capture_thread;
 
-void Audio_init(unsigned int sampleRate, int framesPerBuf)
+bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset)
 {
+    (void)recordingPreset;
     int err;
     unsigned int rate = sampleRate;
     snd_pcm_hw_params_t *hw_params;
@@ -45,50 +46,50 @@ void Audio_init(unsigned int sampleRate, int framesPerBuf)
         fprintf (stderr, "cannot open audio device %s (%s)\n", 
                     device_name,
                     snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     if ((err = snd_pcm_hw_params_malloc (&hw_params)) < 0) 
     {
         fprintf (stderr, "cannot allocate hardware parameter structure (%s)\n", snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     if ((err = snd_pcm_hw_params_any (capture_handle, hw_params)) < 0) 
     {
         fprintf (stderr, "cannot initialize hardware parameter structure (%s)\n",
                     snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     if ((err = snd_pcm_hw_params_set_access (capture_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) 
     {
         fprintf (stderr, "cannot set access type (%s)\n", snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     if ((err = snd_pcm_hw_params_set_format (capture_handle, hw_params, format)) < 0) 
     {
         fprintf (stderr, "cannot set sample format (%s)\n", snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     if ((err = snd_pcm_hw_params_set_rate_near (capture_handle, hw_params, &rate, 0)) < 0) 
     {
         fprintf (stderr, "cannot set sample rate (%s)\n", snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     if ((err = snd_pcm_hw_params_set_channels (capture_handle, hw_params, 1)) < 0) 
     {
         fprintf (stderr, "cannot set channel count (%s)\n", snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     if ((err = snd_pcm_hw_params (capture_handle, hw_params)) < 0) 
     {
         fprintf (stderr, "cannot set parameters (%s)\n", snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     snd_pcm_hw_params_free (hw_params);
@@ -96,7 +97,7 @@ void Audio_init(unsigned int sampleRate, int framesPerBuf)
     if ((err = snd_pcm_prepare (capture_handle)) < 0) 
     {
         fprintf (stderr, "cannot prepare audio interface for use (%s)\n", snd_strerror (err));
-        exit (1);
+        return false;
     }
 
     uint32_t bufSize = buffer_frames * 1 * 16;//engine.fastPathFramesPerBuf_ * engine.sampleChannels_ * engine.bitsPerSample_;
@@ -111,6 +112,7 @@ void Audio_init(unsigned int sampleRate, int framesPerBuf)
     {
         freeQueue_->push(&bufs_[i]);
     }
+    return true;
 }
 
 void Audio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ)
@@ -141,10 +143,11 @@ static void * debug_capture_thread_fn( void * v )
     return NULL;
 }
 
-void Audio_startPlay()
+bool Audio_startPlay()
 {
     recording = true;    
     pthread_create(&debug_capture_thread, NULL, debug_capture_thread_fn, NULL);
+    return true;
 }
 
 void Audio_deinit()

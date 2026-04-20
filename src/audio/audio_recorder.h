@@ -39,8 +39,9 @@ class AudioRecorder {
   void *ctx_;
 
  public:
-  explicit AudioRecorder(SampleFormat *, SLEngineItf engineEngine);
+  explicit AudioRecorder(SampleFormat *, SLEngineItf engineEngine, SLuint32 recordingPreset);
   ~AudioRecorder();
+  bool IsValid() const;
   SLboolean Start(void);
   SLboolean Stop(void);
   SLboolean Pause(void);

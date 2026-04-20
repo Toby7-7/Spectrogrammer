@@ -26,7 +26,7 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
         pSelectedFilename = NULL;
 
     bool res = false;
-    if (ImGui::BeginListBox("##empty", ImVec2(-1, 5 * ImGui::GetTextLineHeightWithSpacing())))
+    if (ImGui::BeginListBox("##files", ImVec2(-1, 5 * ImGui::GetTextLineHeightWithSpacing())))
     {
         linked_list *pTmp = pList;
         while(pTmp != NULL)
@@ -103,7 +103,17 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
         ImGui::Separator();
         if (ImGui::Button("OK", ImVec2(120, 0))) 
         { 
-            rename(pSelectedFilename, newFilename);
+            char oldFilename[1024];
+            char renamedFilename[1024];
+            strcpy(oldFilename, pWorkingDirectory);
+            strcat(oldFilename, "/");
+            strcat(oldFilename, pSelectedFilename);
+
+            strcpy(renamedFilename, pWorkingDirectory);
+            strcat(renamedFilename, "/");
+            strcat(renamedFilename, newFilename);
+
+            rename(oldFilename, renamedFilename);
             RefreshFiles(pWorkingDirectory);
             ImGui::CloseCurrentPopup(); 
         }
@@ -148,4 +158,3 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
 
     return res;
 }
-

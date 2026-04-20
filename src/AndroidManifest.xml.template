@@ -5,8 +5,14 @@
     <uses-permission android:name="android.permission.SET_RELEASE_APP"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <application android:debuggable="true" android:hasCode="false" android:label="${LABEL}" tools:replace="android:icon,android:theme,android:allowBackup,label" android:icon="@mipmap/icon">
+    <application android:debuggable="true" android:hasCode="true" android:extractNativeLibs="true" android:label="${LABEL}" tools:replace="android:icon,android:theme,android:allowBackup,label" android:icon="@mipmap/icon">
+        <service
+            android:name=".CaptureForegroundService"
+            android:exported="false" />
         <activity android:configChanges="keyboardHidden|orientation" android:label="${LABEL}" android:name="android.app.NativeActivity" android:exported="true"  android:screenOrientation="portrait">
             <meta-data android:name="android.app.lib_name" android:value="${APPNAME}"/>
             <intent-filter>

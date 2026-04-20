@@ -13,8 +13,11 @@
 #include <android/log.h>
 #include <android_native_app_glue.h>
 #include <android/asset_manager.h>
+#include <android/input.h>
+#include <android/window.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
+#include <unistd.h>
 #include <string>
 #include "Spectrogrammer.h"
 
@@ -24,8 +27,12 @@ static EGLSurface           g_EglSurface = EGL_NO_SURFACE;
 static EGLContext           g_EglContext = EGL_NO_CONTEXT;
 static struct android_app*  g_App = nullptr;
 static bool                 g_Initialized = false;
+static bool                 g_SpectrogrammerInitialized = false;
+static bool                 g_RecordAudioPermissionRequested = false;
+static bool                 g_BackgroundServiceRunning = false;
 static char                 g_LogTag[] = "ImGuiExample";
 static std::string          g_IniFilename = "";
+static ImVector<ImWchar>    g_FontGlyphRanges;
 
 // Forward declarations of helper functions
 static void Start(struct android_app* app);
@@ -37,6 +44,15 @@ static void MainLoopStep();
 static void AndroidDisplayKeyboard(int pShow);
 static int GetAssetData(const char* filename, void** out_data);
 static void keep_screen_on();
+static bool HasRecordAudioPermission();
+static void RequestRecordAudioPermission();
+static void DrawPermissionPrompt();
+static void ConfigureImGuiStyle();
+static const ImWchar* BuildUiGlyphRanges();
+static void LoadBestAvailableFont();
+static void StartCaptureForegroundService();
+static void StopCaptureForegroundService();
+static void MoveTaskToBack();
 
 // Main code
 static void handleAppCmd(struct android_app* app, int32_t appCmd)
@@ -68,6 +84,39 @@ static void handleAppCmd(struct android_app* app, int32_t appCmd)
 
 static int32_t handleInputEvent(struct android_app* app, AInputEvent* inputEvent)
 {
+    if (AInputEvent_getType(inputEvent) == AINPUT_EVENT_TYPE_KEY &&
+        AKeyEvent_getKeyCode(inputEvent) == AKEYCODE_BACK)
+    {
+        if (AKeyEvent_getAction(inputEvent) == AKEY_EVENT_ACTION_UP)
+        {
+            if (!Spectrogrammer_HandleBackPressed())
+                MoveTaskToBack();
+        }
+        return 1;
+    }
+
+    if (ImGui::GetCurrentContext() == nullptr)
+        return 0;
+
+    if (AInputEvent_getType(inputEvent) == AINPUT_EVENT_TYPE_MOTION)
+    {
+        const int32_t pointer_count = AMotionEvent_getPointerCount(inputEvent);
+        const int32_t action = AMotionEvent_getAction(inputEvent) & AMOTION_EVENT_ACTION_MASK;
+        if (pointer_count >= 2)
+        {
+            float xs[2] = {
+                AMotionEvent_getX(inputEvent, 0),
+                AMotionEvent_getX(inputEvent, 1),
+            };
+            float ys[2] = {
+                AMotionEvent_getY(inputEvent, 0),
+                AMotionEvent_getY(inputEvent, 1),
+            };
+            if (Spectrogrammer_HandleTouchGesture(action, 2, xs, ys))
+                return 1;
+        }
+    }
+
     return ImGui_ImplAndroid_HandleInputEvent(inputEvent);
 }
 
@@ -91,9 +140,14 @@ extern "C" void android_main(struct android_app* app)
             // Exit the app by returning from within the infinite loop
             if (app->destroyRequested != 0)
             {
-                // shutdown() should have been called already while processing the
-                // app command APP_CMD_TERM_WINDOW. But we play save here
-                if (!g_Initialized)
+                if (g_SpectrogrammerInitialized)
+                {
+                    StopCaptureForegroundService();
+                    Spectrogrammer_Shutdown();
+                    g_SpectrogrammerInitialized = false;
+                }
+
+                if (g_Initialized)
                     Shutdown();
 
                 return;
@@ -175,23 +229,13 @@ void Init(struct android_app* app)
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
+    ConfigureImGuiStyle();
 
     // Setup Platform/Renderer backends
     ImGui_ImplAndroid_Init(g_App->window);
     ImGui_ImplOpenGL3_Init("#version 300 es");
 
-    // We load the default font with increased size to improve readability on many devices with "high" DPI.
-    // FIXME: Put some effort into DPI awareness.
-    // Important: when calling AddFontFromMemoryTTF(), ownership of font_data is transferred by Dear ImGui by default (deleted is handled by Dear ImGui), unless we set FontDataOwnedByAtlas=false in ImFontConfig
-    ImFontConfig font_cfg;
-    font_cfg.SizePixels = 22.0f * 2;
-    io.Fonts->AddFontDefault(&font_cfg);
-
-    // Arbitrary scale-up
-    // FIXME: Put some effort into DPI awareness
-    ImGui::GetStyle().ScaleAllSizes(3.0f * 2);
-
-    Spectrogrammer_Init(app);
+    LoadBestAvailableFont();
 
     g_Initialized = true;
 }
@@ -213,7 +257,32 @@ void MainLoopStep()
     ImGui_ImplAndroid_NewFrame();
     ImGui::NewFrame();
 
-    Spectrogrammer_MainLoopStep();
+    if (!g_SpectrogrammerInitialized)
+    {
+        if (HasRecordAudioPermission())
+        {
+            Spectrogrammer_Init(g_App);
+            g_SpectrogrammerInitialized = true;
+            StartCaptureForegroundService();
+        }
+        else
+        {
+            if (!g_RecordAudioPermissionRequested)
+                RequestRecordAudioPermission();
+            DrawPermissionPrompt();
+        }
+    }
+
+    if (g_SpectrogrammerInitialized)
+    {
+        Spectrogrammer_MainLoopStep();
+        if (Spectrogrammer_ShouldRunInBackground())
+            StartCaptureForegroundService();
+        else
+            StopCaptureForegroundService();
+    }
+
+    keep_screen_on();
 
     // Rendering
     ImGui::Render();
@@ -231,12 +300,11 @@ void Shutdown()
     if (!g_Initialized)
         return;
 
-    // Cleanup
+    Spectrogrammer_ReleaseGraphics();
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplAndroid_Shutdown();
     ImGui::DestroyContext();
-
-    Spectrogrammer_Shutdown();
 
     if (g_EglDisplay != EGL_NO_DISPLAY)
     {
@@ -256,6 +324,7 @@ void Shutdown()
     g_EglSurface = EGL_NO_SURFACE;
     ANativeWindow_release(g_App->window);
 
+    g_RecordAudioPermissionRequested = false;
     g_Initialized = false;
 }
 
@@ -284,22 +353,13 @@ void Shutdown()
 
 void keep_screen_on() 
 {
-    SETUP_FOR_JAVA_CALL
+    if (g_App == nullptr || g_App->activity == nullptr)
+        return;
 
-	jclass activityClass = env->FindClass( ENVCALL "android/app/NativeActivity");
-
-	// Retrieves NativeActivity.
-	jobject lNativeActivity = g_App->activity->clazz;
-
-
-    jmethodID getWindowMethod = env->GetMethodID(ENVCALL activityClass, "getWindow", "()Landroid/view/Window;");
-    jobject lWindow = env->CallObjectMethod(ENVCALL lNativeActivity, getWindowMethod);
-    jclass ClassWindow = env->FindClass( ENVCALL "android/view/Window");
-
-    jmethodID addFlagsMethod = env->GetMethodID(ENVCALL ClassWindow, "addFlags", "(I)V");
-
-    const int FLAG_KEEP_SCREEN_ON = 128;  // 0x80
-    env->CallVoidMethod(ENVCALL lWindow, addFlagsMethod, FLAG_KEEP_SCREEN_ON);
+    ANativeActivity_setWindowFlags(
+        g_App->activity,
+        Spectrogrammer_ShouldStayAwake() ? AWINDOW_FLAG_KEEP_SCREEN_ON : 0,
+        Spectrogrammer_ShouldStayAwake() ? 0 : AWINDOW_FLAG_KEEP_SCREEN_ON);
 }
 
 void AndroidDisplayKeyboard(int pShow)
@@ -347,6 +407,324 @@ void AndroidDisplayKeyboard(int pShow)
 	}
 
 	JAVA_CALL_DETACH
+}
+
+static bool HasRecordAudioPermission()
+{
+    if (g_App == nullptr)
+        return false;
+
+    SETUP_FOR_JAVA_CALL
+
+    jclass activityClass = env->FindClass(ENVCALL "android/app/NativeActivity");
+    jobject nativeActivity = g_App->activity->clazz;
+    jmethodID checkSelfPermissionMethod = env->GetMethodID(
+        ENVCALL activityClass, "checkSelfPermission", "(Ljava/lang/String;)I");
+    jstring permission = env->NewStringUTF("android.permission.RECORD_AUDIO");
+    jint permissionState = env->CallIntMethod(
+        ENVCALL nativeActivity, checkSelfPermissionMethod, permission);
+    env->DeleteLocalRef(permission);
+
+    JAVA_CALL_DETACH
+
+    return permissionState == 0;
+}
+
+static void RequestRecordAudioPermission()
+{
+    if (g_App == nullptr)
+        return;
+
+    SETUP_FOR_JAVA_CALL
+
+    jclass activityClass = env->FindClass(ENVCALL "android/app/NativeActivity");
+    jobject nativeActivity = g_App->activity->clazz;
+    jclass stringClass = env->FindClass(ENVCALL "java/lang/String");
+    jobjectArray permissions = env->NewObjectArray(1, stringClass, nullptr);
+    jstring permission = env->NewStringUTF("android.permission.RECORD_AUDIO");
+    env->SetObjectArrayElement(ENVCALL permissions, 0, permission);
+
+    jmethodID requestPermissionsMethod = env->GetMethodID(
+        ENVCALL activityClass, "requestPermissions", "([Ljava/lang/String;I)V");
+    env->CallVoidMethod(ENVCALL nativeActivity, requestPermissionsMethod, permissions, 1001);
+
+    env->DeleteLocalRef(permission);
+    env->DeleteLocalRef(permissions);
+    g_RecordAudioPermissionRequested = true;
+
+    JAVA_CALL_DETACH
+}
+
+static void DrawPermissionPrompt()
+{
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+                             ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoResize;
+
+    ImGui::Begin("麦克风权限", nullptr, flags);
+    ImGui::SetCursorPosY(viewport->WorkSize.y * 0.25f);
+    ImGui::TextWrapped("频谱仪需要麦克风权限后才能启动频谱分析。");
+    ImGui::Spacing();
+    ImGui::TextWrapped("请在系统弹窗中授予录音权限，然后点击“重试”。");
+    ImGui::Spacing();
+    if (ImGui::Button("重试", ImVec2(-1.0f, 0.0f)))
+    {
+        g_RecordAudioPermissionRequested = false;
+        RequestRecordAudioPermission();
+    }
+    ImGui::End();
+}
+
+static float CalculateUiScale()
+{
+    if (g_App == nullptr || g_App->window == nullptr)
+        return 2.0f;
+
+    const int width = ANativeWindow_getWidth(g_App->window);
+    const int height = ANativeWindow_getHeight(g_App->window);
+    const int short_side = width < height ? width : height;
+    float scale = short_side / 390.0f;
+    if (scale < 2.0f)
+        scale = 2.0f;
+    if (scale > 3.15f)
+        scale = 3.15f;
+    return scale;
+}
+
+static void ConfigureImGuiStyle()
+{
+    ImGuiStyle& style = ImGui::GetStyle();
+    const float ui_scale = CalculateUiScale();
+    style.ScaleAllSizes(ui_scale);
+    style.TouchExtraPadding = ImVec2(8.0f * ui_scale, 8.0f * ui_scale);
+    style.WindowBorderSize = 0.0f;
+    style.PopupBorderSize = 0.0f;
+    style.FrameRounding = 10.0f * ui_scale;
+    style.FramePadding = ImVec2(12.0f * ui_scale, 10.0f * ui_scale);
+    style.GrabRounding = 10.0f * ui_scale;
+    style.ScrollbarRounding = 10.0f * ui_scale;
+    style.ScrollbarSize = 22.0f * ui_scale;
+    style.ItemSpacing = ImVec2(12.0f * ui_scale, 12.0f * ui_scale);
+    style.WindowPadding = ImVec2(16.0f * ui_scale, 16.0f * ui_scale);
+}
+
+static bool TryLoadSystemFont(const char* path, float size_pixels)
+{
+    if (path == nullptr || access(path, R_OK) != 0)
+        return false;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImFontConfig font_cfg;
+    font_cfg.SizePixels = size_pixels;
+    font_cfg.OversampleH = 2;
+    font_cfg.OversampleV = 2;
+    font_cfg.PixelSnapH = false;
+    if (io.Fonts->AddFontFromFileTTF(path, size_pixels, &font_cfg, BuildUiGlyphRanges()) != nullptr)
+    {
+        __android_log_print(ANDROID_LOG_INFO, g_LogTag, "loaded system font: %s", path);
+        return true;
+    }
+
+    return false;
+}
+
+static const ImWchar* BuildUiGlyphRanges()
+{
+    if (!g_FontGlyphRanges.empty())
+        return g_FontGlyphRanges.Data;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImFontGlyphRangesBuilder builder;
+    builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+    builder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+
+    static const char* kUiTexts[] = {
+        "频谱仪",
+        "主窗口",
+        "麦克风权限",
+        "频谱仪需要麦克风权限后才能启动频谱分析。",
+        "请在系统弹窗中授予录音权限，然后点击“重试”。",
+        "重试",
+        "返回主界面",
+        "暂停",
+        "继续",
+        "对比",
+        "清除峰值",
+        "音频",
+        "显示",
+        "语言",
+        "中文",
+        "英文",
+        "默认",
+        "通用",
+        "语音识别",
+        "摄像机",
+        "未处理",
+        "采样率",
+        "自动",
+        "处理",
+        "FFT 大小",
+        "抽取级数",
+        "窗函数",
+        "矩形窗",
+        "汉宁窗",
+        "汉明窗",
+        "布莱克曼-哈里斯窗",
+        "滚动速度",
+        "越小越快",
+        "越大越平滑",
+        "指数平滑因子",
+        "频率轴刻度",
+        "普通对数",
+        "音乐对数",
+        "实时峰值",
+        "短时峰值",
+        "峰值标记来源",
+        "视图",
+        "运行",
+        "后台采集",
+        "显示瀑布图",
+        "分钟",
+        "Mel",
+        "Bark",
+        "ERB",
+        "线性",
+        "瀑布图高度",
+        "显示峰值保持曲线",
+        "峰值回落时长",
+        "峰值标记",
+        "保持亮屏",
+        "频谱",
+        "当前",
+        "上限",
+        "输入",
+        "分辨率",
+        "秒",
+        "个",
+        "记录当前曲线",
+        "清除基线",
+        "关闭",
+    };
+
+    for (const char* text : kUiTexts)
+        builder.AddText(text);
+
+    builder.BuildRanges(&g_FontGlyphRanges);
+    return g_FontGlyphRanges.Data;
+}
+
+static void LoadBestAvailableFont()
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+
+    const float ui_scale = CalculateUiScale();
+    const float font_size = 20.0f * ui_scale;
+    static const char* kFontCandidates[] = {
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/NotoSansSC-Regular.otf",
+        "/system/fonts/NotoSansCJKsc-Regular.otf",
+        "/system/fonts/NotoSansHans-Regular.otf",
+        "/system/fonts/SourceHanSansSC-Regular.otf",
+        "/system/fonts/SourceHanSansCN-Regular.otf",
+        "/system/fonts/NotoSerifCJK-Regular.ttc",
+        "/system/fonts/DroidSansFallback.ttf",
+        "/system/fonts/MiSans-Normal.ttf",
+        "/system/fonts/ColorOSUI-Regular.ttf",
+        "/system/fonts/OPlusSans3VF.ttf",
+        "/system/fonts/OPlusSans-Regular.ttf",
+        "/system/fonts/OPPOSans-R.ttf",
+        "/system/fonts/HarmonyOS_Sans_SC_Regular.ttf",
+    };
+
+    for (const char* candidate : kFontCandidates)
+    {
+        if (TryLoadSystemFont(candidate, font_size))
+            return;
+    }
+
+    ImFontConfig font_cfg;
+    font_cfg.SizePixels = font_size;
+    io.Fonts->AddFontDefault(&font_cfg);
+    __android_log_print(ANDROID_LOG_WARN, g_LogTag, "%s", "no system CJK font found; using fallback font");
+}
+
+static jobject BuildForegroundServiceIntent(JNIEnv *env, jobject nativeActivity)
+{
+    jclass intentClass = env->FindClass("android/content/Intent");
+    jmethodID ctor = env->GetMethodID(intentClass, "<init>", "()V");
+    jobject intent = env->NewObject(intentClass, ctor);
+    jmethodID setClassNameMethod = env->GetMethodID(
+        intentClass, "setClassName",
+        "(Landroid/content/Context;Ljava/lang/String;)Landroid/content/Intent;");
+    jstring className = env->NewStringUTF("org.nanoorg.Spectrogrammer.CaptureForegroundService");
+    env->CallObjectMethod(intent, setClassNameMethod, nativeActivity, className);
+    env->DeleteLocalRef(className);
+    return intent;
+}
+
+static void StartCaptureForegroundService()
+{
+    if (g_BackgroundServiceRunning || g_App == nullptr || g_App->activity == nullptr)
+        return;
+
+    if (!Spectrogrammer_ShouldRunInBackground())
+        return;
+
+    SETUP_FOR_JAVA_CALL
+
+    jobject nativeActivity = g_App->activity->clazz;
+    jclass activityClass = env->GetObjectClass(nativeActivity);
+    jobject intent = BuildForegroundServiceIntent(env, nativeActivity);
+
+    jmethodID startForegroundServiceMethod = env->GetMethodID(
+        activityClass, "startForegroundService", "(Landroid/content/Intent;)Landroid/content/ComponentName;");
+    env->CallObjectMethod(ENVCALL nativeActivity, startForegroundServiceMethod, intent);
+    env->DeleteLocalRef(intent);
+
+    g_BackgroundServiceRunning = true;
+
+    JAVA_CALL_DETACH
+}
+
+static void StopCaptureForegroundService()
+{
+    if (!g_BackgroundServiceRunning || g_App == nullptr || g_App->activity == nullptr)
+        return;
+
+    SETUP_FOR_JAVA_CALL
+
+    jobject nativeActivity = g_App->activity->clazz;
+    jclass activityClass = env->GetObjectClass(nativeActivity);
+    jobject intent = BuildForegroundServiceIntent(env, nativeActivity);
+
+    jmethodID stopServiceMethod = env->GetMethodID(activityClass, "stopService", "(Landroid/content/Intent;)Z");
+    env->CallBooleanMethod(ENVCALL nativeActivity, stopServiceMethod, intent);
+    env->DeleteLocalRef(intent);
+
+    g_BackgroundServiceRunning = false;
+
+    JAVA_CALL_DETACH
+}
+
+static void MoveTaskToBack()
+{
+    if (g_App == nullptr || g_App->activity == nullptr)
+        return;
+
+    SETUP_FOR_JAVA_CALL
+
+    jobject nativeActivity = g_App->activity->clazz;
+    jclass activityClass = env->GetObjectClass(nativeActivity);
+    jmethodID moveTaskToBackMethod = env->GetMethodID(activityClass, "moveTaskToBack", "(Z)Z");
+    if (moveTaskToBackMethod != nullptr)
+        env->CallBooleanMethod(ENVCALL nativeActivity, moveTaskToBackMethod, JNI_TRUE);
+
+    JAVA_CALL_DETACH
 }
 
 

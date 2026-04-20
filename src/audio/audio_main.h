@@ -3,12 +3,10 @@
 
 #include "audio_common.h"
 
-void Audio_init(unsigned int sampleRate, int framesPerBuf);
+bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset);
 void Audio_deinit();
 float Audio_getSampleRate();
 void Audio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ);
-void Audio_startPlay();
-
-
+bool Audio_startPlay();
 
 

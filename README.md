@@ -1,50 +1,102 @@
-# Spectrogrammer
+# 频谱仪 / Spectrogrammer
 
-Spectrum Analyzer
+一个以 Android 竖屏触控为主、同时保留 Linux 构建能力的实时音频频谱分析器。当前分支已经不再是上游 `Spectrogrammer` 的原样镜像，而是围绕中文界面、手机操作和频谱/瀑布图查看做过较大重构的版本。
 
-## Features
-- Runs on Android and Linux
-- Frequency analysis
-    - 4096 bands FFT 
-    - configurable
-       - decay
-       - averaging
-- Visualization    
-   - Spectrogram
-   - Waterfall
-      - Uses a magma heatmap
-      - When hold is active a binary heatmap is used to shows above/below values
-   - Linear / Log scales for both axis
-   - Hold function to capture refrence levels
-      - Save/load/delete/rename for comparing 
-- High performance, developed entirely in C/C++
+## 主要特性
+- 实时频谱曲线与瀑布图
+- 频率轴支持 `线性`、`普通对数`、`音乐对数`、`Mel`、`Bark`、`ERB`
+- 峰值保持曲线，支持自动回落或不回落
+- 峰值标记，可切换显示 `实时峰值` 或 `短时峰值`
+- 手动游标线，点击或拖动显示当前位置的频率与 dB
+- 双指缩放和平移，便于查看局部频段
+- 中文化音频/显示设置，适合手机竖屏触控
+- Android 后台采集、保持亮屏、返回键回主界面等行为适配
+- 主体逻辑以 C/C++ 实现，Android 额外带一个前台服务 Java 类
 
-## Screenshot
-<img src="fastlane/metadata/android/en-US/phoneScreenshots/Screenshot.png" alt="Screenshot" width="200"/>
+## 快速上手
+1. 安装 APK 并授予录音权限。
+2. 主界面顶部四个按钮分别是 `暂停/继续`、`清除峰值`、`音频`、`显示`。
+3. 在主图上单指点击或拖动，可移动手动游标并查看当前频率与 dB。
+4. 双指左右缩放或平移，可聚焦某个频段。
+5. 进入 `音频` 或 `显示` 页面后，可用页面顶部的 `返回主界面` 按钮，或直接使用 Android 返回键返回主界面。
 
-## Building
+## 设置速览
+### 音频
+- `音频源`：切换 Android 录音 preset，如默认、通用、语音识别、摄像机、未处理。
+- `采样率`：自动或固定采样率。更高档位是否可用取决于设备和驱动。
+- `FFT 大小`：频率分辨率和刷新负担的平衡，当前范围为 `128` 到 `8192`。
+- `抽取级数`：先降采样再做频谱，分辨率更细，但最高可显示频率会下降。
+- `窗函数`：控制频谱泄漏与主瓣宽度。
+- `滚动速度`：目标变换间隔，范围 `2 ms` 到 `250 ms`，越小越快。
+- `指数平滑因子`：曲线平滑程度，数值越大越平滑。
+
+### 显示
+- `频率轴刻度`：切换 `线性`、`普通对数`、`音乐对数`、`Mel`、`Bark`、`ERB`。
+- `瀑布图高度`：设置瀑布图占屏比例。
+- `显示峰值保持曲线`：显示或隐藏峰值保持曲线。
+- `峰值回落时长`：峰值保持回落速度，`0` 表示不回落，最大 `120 s`。
+- `峰值标记`：显示 `0 / 1 / 3 / 5` 个峰值点。
+- `峰值标记来源`：从实时曲线或短时峰值曲线中找峰值。
+- `显示瀑布图`：关闭后只保留上方频谱图。
+- `后台采集`：切到后台时继续录音与处理。
+- `保持亮屏`：运行时阻止屏幕自动熄灭。
+
+## 默认配置
+- 音频源：`默认`
+- 采样率：`自动（48 kHz）`
+- FFT 大小：`4096`
+- 平滑因子：`0.10`
+- 峰值标记来源：`短时峰值`
+- 峰值保持曲线：开启，默认 `4 秒` 回落
+- 后台采集：开启
+
+## 截图
+<img src="fastlane/metadata/android/en-US/phoneScreenshots/IMG_20260420_133439.jpg" alt="频谱仪 Android 实机截图" width="240"/>
+
+## 构建
+### Android
+在仓库根目录执行：
+
+```bash
+make init-submodules
+make doctor-android
+make BUILD_ANDROID=y
 ```
-# clone with
-git clone git@github.com:aguaviva/spectrogrammer.git --recurse-submodules --shallow-submodules
 
-# Build for Android
-> make BUILD_ANDROID=y
-> make push run 
+常用命令：
 
-# Build for Linux
-> make BUILD_ANDROID=n
+```bash
+make push
+make run
+make logcat
+make clean
 ```
 
-## Notes/stuff I need help with:
-- If app loses focus will crash/lose data
-- getting a nice makefile that can compile for linux and windows
-- I can't get to build the app and kissfft in on step
-- Created a rudimetary lib for imgui to speed up linking, is there a better way?
-- App shouldn't refresh as soon as possible, only when needed
-- should prob use Cnlohr audio libs :)
+说明：
+- `make BUILD_ANDROID=y` 会产出 `Spectrogrammer.apk`
+- APK 默认使用仓库内测试签名，仅适合本地安装与调试
+- `make doctor-android` 会检查 SDK、NDK、build-tools、子模块和必要命令
+- 当前 Android 目标 API 为 `29`
 
-## credits
-- cnlohr for [rawdrawandroid](https://github.com/cnlohr/rawdrawandroid)
-- mborgerding for [kissfft](https://github.com/mborgerding/kissfft)
+### Linux
+```bash
+make BUILD_ANDROID=n
+```
 
-[def]: Screenshot.png
+## 目录说明
+- `src/app`：频谱 UI、坐标轴、瀑布图、配置和 FFT 相关逻辑
+- `src/audio`：音频采集与平台驱动封装
+- `src/java`：Android 前台服务
+- `fastlane/metadata`：应用发布元数据和截图
+- `submodules/imgui`、`submodules/kissfft`：上游子模块依赖
+
+## 已知注意事项
+- 高采样率和 `未处理` 音频源是否可用，完全取决于设备和驱动实现。
+- 本仓库当前优先保证 Android 手机体验，Linux 路线仍保留但不是主要优化目标。
+- 如果切换到设备不支持的高采样率档位，可能无法正常启动录音，应改回更低档位。
+
+## 致谢
+- [aguaviva/spectrogrammer](https://github.com/aguaviva/spectrogrammer)
+- [cnlohr/rawdrawandroid](https://github.com/cnlohr/rawdrawandroid)
+- [mborgerding/kissfft](https://github.com/mborgerding/kissfft)
+- [ocornut/imgui](https://github.com/ocornut/imgui)

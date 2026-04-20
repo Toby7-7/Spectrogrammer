@@ -104,7 +104,7 @@ void AudioRecorder::ProcessSLCallback(SLAndroidSimpleBufferQueueItf bq) {
   }
 }
 
-AudioRecorder::AudioRecorder(SampleFormat *sampleFormat, SLEngineItf slEngine)
+AudioRecorder::AudioRecorder(SampleFormat *sampleFormat, SLEngineItf slEngine, SLuint32 recordingPreset)
     : freeQueue_(nullptr),
       recQueue_(nullptr),
       devShadowQueue_(nullptr),
@@ -132,14 +132,17 @@ AudioRecorder::AudioRecorder(SampleFormat *sampleFormat, SLEngineItf slEngine)
                                SL_IID_ANDROIDCONFIGURATION};
   const SLboolean req[2] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE};
   result = (*slEngine)->CreateAudioRecorder(slEngine, &recObjectItf_, &audioSrc, &audioSnk, sizeof(id) / sizeof(id[0]), id, req);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS) {
+    recObjectItf_ = nullptr;
+    return;
+  }
 
 
   // Configure the voice recognition preset which has no signal processing for lower latency.
   SLAndroidConfigurationItf inputConfig;
   result = (*recObjectItf_)->GetInterface(recObjectItf_, SL_IID_ANDROIDCONFIGURATION, &inputConfig);
   if (SL_RESULT_SUCCESS == result) {
-    SLuint32 presetValue = SL_ANDROID_RECORDING_PRESET_VOICE_RECOGNITION;
+    SLuint32 presetValue = recordingPreset;
     (*inputConfig)->SetConfiguration(inputConfig, SL_ANDROID_KEY_RECORDING_PRESET, &presetValue, sizeof(SLuint32));
   }
 /*
@@ -150,15 +153,19 @@ AudioRecorder::AudioRecorder(SampleFormat *sampleFormat, SLEngineItf slEngine)
   }
 */
   result = (*recObjectItf_)->Realize(recObjectItf_, SL_BOOLEAN_FALSE);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return;
   result = (*recObjectItf_)->GetInterface(recObjectItf_, SL_IID_RECORD, &recItf_);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return;
 
   result = (*recObjectItf_)->GetInterface(recObjectItf_, SL_IID_ANDROIDSIMPLEBUFFERQUEUE, &recBufQueueItf_);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return;
 
   result = (*recBufQueueItf_)->RegisterCallback(recBufQueueItf_, bqRecorderCallback, this);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return;
 /*
   // Disable AGC if requested
   {
@@ -178,15 +185,21 @@ AudioRecorder::AudioRecorder(SampleFormat *sampleFormat, SLEngineItf slEngine)
   }
 */
   devShadowQueue_ = new AudioQueue(DEVICE_SHADOW_BUFFER_QUEUE_LEN);
-  assert(devShadowQueue_);
+  if (!devShadowQueue_)
+    return;
 #ifdef ENABLE_LOG
   std::string name = "rec";
   recLog_ = new AndroidLog(name);
 #endif
 }
 
+bool AudioRecorder::IsValid() const
+{
+  return recObjectItf_ != nullptr && recItf_ != nullptr && recBufQueueItf_ != nullptr && devShadowQueue_ != nullptr;
+}
+
 SLboolean AudioRecorder::Start() {
-  if (!freeQueue_ || !recQueue_ || !devShadowQueue_) {
+  if (!IsValid() || !freeQueue_ || !recQueue_ || !devShadowQueue_) {
     //LOGE("====NULL poiter to Start(%p, %p, %p)", freeQueue_, recQueue_, devShadowQueue_);
     return SL_BOOLEAN_FALSE;
   }
@@ -195,9 +208,11 @@ SLboolean AudioRecorder::Start() {
   SLresult result;
   // in case already recording, stop recording and clear buffer queue
   result = (*recItf_)->SetRecordState(recItf_, SL_RECORDSTATE_STOPPED);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return SL_BOOLEAN_FALSE;
   result = (*recBufQueueItf_)->Clear(recBufQueueItf_);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return SL_BOOLEAN_FALSE;
 
   for (int i = 0; i < RECORD_DEVICE_KICKSTART_BUF_COUNT; i++) {
     sample_buf *buf = nullptr;
@@ -209,30 +224,37 @@ SLboolean AudioRecorder::Start() {
     assert(buf->buf_ && buf->cap_ && !buf->size_);
 
     result = (*recBufQueueItf_)->Enqueue(recBufQueueItf_, buf->buf_, buf->cap_);
-    SLASSERT(result);
+    if (result != SL_RESULT_SUCCESS)
+      return SL_BOOLEAN_FALSE;
     devShadowQueue_->push(buf);
   }
 
   result = (*recItf_)->SetRecordState(recItf_, SL_RECORDSTATE_RECORDING);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return SL_BOOLEAN_FALSE;
 
   return ((result == SL_RESULT_SUCCESS) ? SL_BOOLEAN_TRUE : SL_BOOLEAN_FALSE);
 }
 
 SLboolean AudioRecorder::Pause() {
+    if (!IsValid())
+        return SL_BOOLEAN_FALSE;
 
     SLuint32 curState;
     SLresult result = (*recItf_)->GetRecordState(recItf_, &curState);
-    SLASSERT(result);
+    if (result != SL_RESULT_SUCCESS)
+        return SL_BOOLEAN_FALSE;
 
     if (curState == SL_RECORDSTATE_RECORDING) {
         SLresult result = (*recItf_)->SetRecordState(recItf_, SL_RECORDSTATE_PAUSED);
-        SLASSERT(result);
+        if (result != SL_RESULT_SUCCESS)
+            return SL_BOOLEAN_FALSE;
         return SL_BOOLEAN_TRUE;
     }
     else if (curState == SL_RECORDSTATE_PAUSED) {
         SLresult result = (*recItf_)->SetRecordState(recItf_, SL_RECORDSTATE_RECORDING);
-        SLASSERT(result);
+        if (result != SL_RESULT_SUCCESS)
+            return SL_BOOLEAN_FALSE;
         return SL_BOOLEAN_TRUE;
     }
 
@@ -242,18 +264,24 @@ SLboolean AudioRecorder::Pause() {
 SLboolean AudioRecorder::Stop() {
   // in case already recording, stop recording and clear buffer queue
 
+  if (!IsValid())
+    return SL_BOOLEAN_FALSE;
+
   SLresult result;
 
   SLuint32 curState;
   result = (*recItf_)->GetRecordState(recItf_, &curState);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return SL_BOOLEAN_FALSE;
   if (curState == SL_RECORDSTATE_STOPPED) {
     return SL_BOOLEAN_TRUE;
   }
   result = (*recItf_)->SetRecordState(recItf_, SL_RECORDSTATE_STOPPED);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return SL_BOOLEAN_FALSE;
   result = (*recBufQueueItf_)->Clear(recBufQueueItf_);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return SL_BOOLEAN_FALSE;
 
 #ifdef ENABLE_LOG
   recLog_->flush();

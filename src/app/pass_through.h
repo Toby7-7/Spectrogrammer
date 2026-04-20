@@ -25,8 +25,10 @@ public:
 
     virtual const char *GetName() const {  return "Pass Through"; };
 
-    void init(int nfft, float sampleRate)
+    void init(int nfft, float sampleRate, int decimationFactor, WindowFunctionType windowFunction)
     {
+        (void)decimationFactor;
+        (void)windowFunction;
         init(nfft);
         m_sampleRate = sampleRate;
     }

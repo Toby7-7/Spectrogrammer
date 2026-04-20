@@ -39,15 +39,17 @@ struct EchoAudioEngine {
   sample_buf *bufs_;
   uint32_t bufCount_;
   uint32_t frameCount_;
+  int recordingPreset_;
 };
 static EchoAudioEngine engine;
 
 bool EngineService(void *ctx, uint32_t msg, void *data);
 void SetBufQueues(float sampleRate, AudioQueue *freeQ, AudioQueue *recQ);
 bool Audio_createAudioRecorder();
+void Audio_deleteSLEngine();
 
 
-void Audio_init(unsigned int sampleRate, int framesPerBuf) {
+bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset) {
   SLresult result;
   memset(&engine, 0, sizeof(engine));
 
@@ -55,15 +57,19 @@ void Audio_init(unsigned int sampleRate, int framesPerBuf) {
   engine.fastPathFramesPerBuf_ = static_cast<uint32_t>(framesPerBuf);
   engine.sampleChannels_ = AUDIO_SAMPLE_CHANNELS;
   engine.bitsPerSample_ = SL_PCMSAMPLEFORMAT_FIXED_16;
+  engine.recordingPreset_ = recordingPreset;
 
   result = slCreateEngine(&engine.slEngineObj_, 0, NULL, 0, NULL, NULL);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return false;
 
   result = (*engine.slEngineObj_)->Realize(engine.slEngineObj_, SL_BOOLEAN_FALSE);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return false;
 
   result = (*engine.slEngineObj_)->GetInterface(engine.slEngineObj_, SL_IID_ENGINE, &engine.slEngineItf_);
-  SLASSERT(result);
+  if (result != SL_RESULT_SUCCESS)
+    return false;
 
   // compute the RECOMMENDED fast audio buffer size:
   //   the lower latency required
@@ -84,7 +90,11 @@ void Audio_init(unsigned int sampleRate, int framesPerBuf) {
     engine.freeBufQueue_->push(&engine.bufs_[i]);
   }
 
-  Audio_createAudioRecorder();
+  if (!Audio_createAudioRecorder()) {
+    Audio_deleteSLEngine();
+    return false;
+  }
+  return true;
 }
 
 void Audio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ)
@@ -95,7 +105,8 @@ void Audio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ)
 
 void Audio_setRecorderCallback(ENGINE_CALLBACK callback)
 {
-    engine.recorder_->RegisterCallback(callback, (void *)&engine);
+    if (engine.recorder_ != nullptr)
+      engine.recorder_->RegisterCallback(callback, (void *)&engine);
 }
 
 float Audio_getSampleRate()
@@ -113,8 +124,10 @@ bool Audio_createAudioRecorder()
   sampleFormat.channels_ = engine.sampleChannels_;
   sampleFormat.sampleRate_ = engine.fastPathSampleRate_;
   sampleFormat.framesPerBuf_ = engine.fastPathFramesPerBuf_;
-  engine.recorder_ = new AudioRecorder(&sampleFormat, engine.slEngineItf_);
-  if (!engine.recorder_) {
+  engine.recorder_ = new AudioRecorder(&sampleFormat, engine.slEngineItf_, static_cast<SLuint32>(engine.recordingPreset_));
+  if (!engine.recorder_ || !engine.recorder_->IsValid()) {
+    delete engine.recorder_;
+    engine.recorder_ = nullptr;
     return JNI_FALSE;
   }
   engine.recorder_->SetBufQueues(engine.freeBufQueue_, engine.recBufQueue_);
@@ -123,25 +136,25 @@ bool Audio_createAudioRecorder()
 }
 
 void Audio_deleteAudioRecorder() {
-
-  if (engine.recorder_) delete engine.recorder_;
-
-LOGE("Buf Disrtibutions: PlayerDev=%d, RecDev=%d, FreeQ=%d, "
-     "RecQ=%d",
-     0,//engine.player_->dbgGetDevBufCount(),
-     engine.recorder_->dbgGetDevBufCount(), engine.freeBufQueue_->size(),
-     engine.recBufQueue_->size());
-
-
+  if (engine.recorder_) {
+    LOGE("Buf Disrtibutions: PlayerDev=%d, RecDev=%d, FreeQ=%d, RecQ=%d",
+         0,
+         engine.recorder_->dbgGetDevBufCount(),
+         engine.freeBufQueue_ ? engine.freeBufQueue_->size() : 0,
+         engine.recBufQueue_ ? engine.recBufQueue_->size() : 0);
+    delete engine.recorder_;
+  }
   engine.recorder_ = nullptr;
 }
 
-void Audio_startPlay() {
+bool Audio_startPlay() {
+  if (engine.recorder_ == nullptr || !engine.recorder_->IsValid())
+    return false;
   engine.frameCount_ = 0;
   /*
    * start player: make it into waitForData state
    */
-  engine.recorder_->Start();
+  return engine.recorder_->Start() == SL_BOOLEAN_TRUE;
 }
 
 void JNICALL Audio_stopPlay() {
@@ -217,5 +230,3 @@ void Audio_deinit()
     Audio_deleteAudioRecorder();
     Audio_deleteSLEngine();
 }
-
-
