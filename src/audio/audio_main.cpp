@@ -49,13 +49,13 @@ bool Audio_createAudioRecorder();
 void Audio_deleteSLEngine();
 
 
-bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset) {
+bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset, int inputChannels) {
   SLresult result;
   memset(&engine, 0, sizeof(engine));
 
   engine.fastPathSampleRate_ = static_cast<SLmilliHertz>(sampleRate);
   engine.fastPathFramesPerBuf_ = static_cast<uint32_t>(framesPerBuf);
-  engine.sampleChannels_ = AUDIO_SAMPLE_CHANNELS;
+  engine.sampleChannels_ = static_cast<uint16_t>(inputChannels <= 1 ? 1 : 2);
   engine.bitsPerSample_ = SL_PCMSAMPLEFORMAT_FIXED_16;
   engine.recordingPreset_ = recordingPreset;
 
@@ -112,6 +112,11 @@ void Audio_setRecorderCallback(ENGINE_CALLBACK callback)
 float Audio_getSampleRate()
 {
     return engine.fastPathSampleRate_;
+}
+
+int Audio_getInputChannelCount()
+{
+    return static_cast<int>(engine.sampleChannels_);
 }
 
 bool Audio_createAudioRecorder()

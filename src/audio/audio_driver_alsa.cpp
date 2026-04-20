@@ -32,14 +32,16 @@ static snd_pcm_t *capture_handle;
 static snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
 static bool recording = false;
 static pthread_t debug_capture_thread;
+static int input_channels_ = 1;
 
-bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset)
+bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset, int inputChannels)
 {
     (void)recordingPreset;
     int err;
     unsigned int rate = sampleRate;
     snd_pcm_hw_params_t *hw_params;
     const char *device_name = "default";
+    input_channels_ = inputChannels <= 1 ? 1 : 2;
 
     if ((err = snd_pcm_open (&capture_handle, device_name, SND_PCM_STREAM_CAPTURE, 0)) < 0) 
     {
@@ -80,7 +82,7 @@ bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset)
         return false;
     }
 
-    if ((err = snd_pcm_hw_params_set_channels (capture_handle, hw_params, 1)) < 0) 
+    if ((err = snd_pcm_hw_params_set_channels (capture_handle, hw_params, input_channels_)) < 0)
     {
         fprintf (stderr, "cannot set channel count (%s)\n", snd_strerror (err));
         return false;
@@ -100,7 +102,8 @@ bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset)
         return false;
     }
 
-    uint32_t bufSize = buffer_frames * 1 * 16;//engine.fastPathFramesPerBuf_ * engine.sampleChannels_ * engine.bitsPerSample_;
+    buffer_frames = framesPerBuf;
+    uint32_t bufSize = buffer_frames * input_channels_ * 16;
     bufSize = (bufSize + 7) >> 3;  // bits --> byte
     bufs_ = allocateSampleBufs(bufCount_, bufSize);
     assert(bufs_);
@@ -118,7 +121,12 @@ bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset)
 void Audio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ)
 {
     *pFreeQ = freeQueue_;
-    *pRecQ = recQueue_; 
+    *pRecQ = recQueue_;
+}
+
+int Audio_getInputChannelCount()
+{
+    return input_channels_;
 }
 
 static void * debug_capture_thread_fn( void * v )

@@ -37,14 +37,14 @@ public:
 
     int getProcessedLength() const { return m_pInput_samples.GetSize(); }
 
-    void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length)
+    void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length, int inputStride)
     {
         assert(m_pInput_samples.GetSize()>=offsetDest+length);
 
         float *m_in_samples = m_pInput_samples.GetData();
         for (int i = 0; i < length; i++)
         {
-            float val = Uint16ToFloat(&input[i]);
+            float val = Uint16ToFloat(&input[i * inputStride]);
 
             int ii= i + offsetDest;
             assert(ii < m_pInput_samples.GetSize());

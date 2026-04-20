@@ -8,10 +8,10 @@
 void ChunkerProcessor::begin()
 {
     assert(m_started == false);
-    m_offset = 0;
+    m_offsetFrames = 0;
     m_started = true;
-    m_srcOffset = 0;
-    m_destOffset = 0;
+    m_srcOffsetFrames = 0;
+    m_destOffsetFrames = 0;
     m_bufferIndex = 0;
 }
 
@@ -30,27 +30,28 @@ bool ChunkerProcessor::releaseUsedAudioChunks()
     {
         assert(front != NULL);
 
-        int frontSize = AU_LEN(front->cap_);
+        int frontSize = AU_LEN(front->cap_) / m_inputChannels;
 
-        if (m_offset < frontSize)
+        if (m_offsetFrames < frontSize)
             return true;
 
         m_pRecQueue->pop();
         m_pFreeQueue->push(front);
 
-        m_offset -= frontSize;
+        m_offsetFrames -= frontSize;
     }
 
     return false;
 }
 
-void ChunkerProcessor::SetQueues(AudioQueue *pRecQueue, AudioQueue *pFreeQueue)
+void ChunkerProcessor::SetQueues(AudioQueue *pRecQueue, AudioQueue *pFreeQueue, int inputChannels)
 {
     assert(pRecQueue != NULL);
     assert(pFreeQueue != NULL);
 
     m_pRecQueue = pRecQueue;
     m_pFreeQueue = pFreeQueue;
+    m_inputChannels = inputChannels <= 1 ? 1 : inputChannels;
 }
 
 void ChunkerProcessor::releaseAllAudioChunks()
@@ -61,50 +62,56 @@ void ChunkerProcessor::releaseAllAudioChunks()
         m_pRecQueue->pop();
         m_pFreeQueue->push(front);
     }
-    m_offset = 0;
-    m_srcOffset = 0;
-    m_destOffset = 0;
+    m_offsetFrames = 0;
+    m_srcOffsetFrames = 0;
+    m_destOffsetFrames = 0;
     m_bufferIndex = 0;
 }
 
-bool ChunkerProcessor::PrepareBuffer(Processor *pSpectrum)
+bool ChunkerProcessor::PrepareBuffer(Processor **pSpectra, int spectrumCount)
 {
-    assert(pSpectrum != NULL);
+    assert(pSpectra != NULL);
+    assert(spectrumCount > 0);
+    assert(pSpectra[0] != NULL);
 
-    int dataToWrite = pSpectrum->getProcessedLength();
+    const int dataToWrite = pSpectra[0]->getProcessedLength();
 
     if (m_bufferIndex == 0)
     {
         if (releaseUsedAudioChunks() == false)
             return false;
 
-        m_srcOffset = m_offset;
+        m_srcOffsetFrames = m_offsetFrames;
     }
 
     sample_buf *buf = nullptr;
     while (m_pRecQueue->peek(&buf, m_bufferIndex))
     {
-        int bufSize = AU_LEN(buf->cap_);
-        int srcBufLeft = bufSize - m_srcOffset;
-        int destLeft = dataToWrite - m_destOffset;
+        const int bufSizeFrames = AU_LEN(buf->cap_) / m_inputChannels;
+        const int srcBufLeft = bufSizeFrames - m_srcOffsetFrames;
+        const int destLeft = dataToWrite - m_destOffsetFrames;
 
-        int toWrite = std::min(destLeft, srcBufLeft);
+        const int toWrite = std::min(destLeft, srcBufLeft);
 
-        AU_FORMAT *ptrB0 = GetSampleData(buf) + m_srcOffset;
-        pSpectrum->convertShortToFFT(ptrB0, m_destOffset, toWrite);
-
-        m_destOffset += toWrite;
-        m_srcOffset += toWrite;
-
-        if (m_srcOffset == bufSize)
+        AU_FORMAT *ptrB0 = GetSampleData(buf) + (m_srcOffsetFrames * m_inputChannels);
+        for (int channel = 0; channel < spectrumCount; channel++)
         {
-            m_srcOffset = 0;
+            assert(pSpectra[channel] != NULL);
+            pSpectra[channel]->convertShortToFFT(ptrB0 + channel, m_destOffsetFrames, toWrite, m_inputChannels);
+        }
+
+        m_destOffsetFrames += toWrite;
+        m_srcOffsetFrames += toWrite;
+
+        if (m_srcOffsetFrames == bufSizeFrames)
+        {
+            m_srcOffsetFrames = 0;
             m_bufferIndex++;
         }
 
-        if (m_destOffset == dataToWrite)
+        if (m_destOffsetFrames == dataToWrite)
         {
-            m_destOffset = 0;
+            m_destOffsetFrames = 0;
             m_bufferIndex = 0;
             return true;
         }
@@ -113,11 +120,11 @@ bool ChunkerProcessor::PrepareBuffer(Processor *pSpectrum)
     return false;
 }
 
-bool ChunkerProcessor::Process(Processor *pSpectrum, int hopSamples)
+bool ChunkerProcessor::Process(Processor **pSpectra, int spectrumCount, int hopSamples)
 {
-    if (PrepareBuffer(pSpectrum))
+    if (PrepareBuffer(pSpectra, spectrumCount))
     {
-        m_offset += hopSamples;
+        m_offsetFrames += hopSamples;
         return true;
     }
 

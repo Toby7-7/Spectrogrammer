@@ -18,6 +18,8 @@
 
 namespace
 {
+constexpr int kWaterfallChannelCapacity = 2;
+
 void calc_scale(float seconds_per_row, float desired_distance, float *notch_distance, float *scale)
 {
     *notch_distance = desired_distance;
@@ -49,118 +51,133 @@ int get_time_magnitude(float total_time)
     return 0;
 }
 
-static int texture_width = -1;
-static int texture_height = -1;
-static GLuint image_texture = 0xffffffff;
-static std::vector<uint16_t> image_storage;
-static std::vector<uint16_t> row_scratch;
-static bool texture_dirty = false;
-
-void ensure_texture()
+struct WaterfallState
 {
-    if (texture_width <= 0 || texture_height <= 0)
+    int texture_width = -1;
+    int texture_height = -1;
+    GLuint image_texture = 0xffffffff;
+    std::vector<uint16_t> image_storage;
+    std::vector<uint16_t> row_scratch;
+    bool texture_dirty = false;
+};
+
+WaterfallState gWaterfalls[kWaterfallChannelCapacity];
+
+WaterfallState *get_waterfall(int channel)
+{
+    if (channel < 0 || channel >= kWaterfallChannelCapacity)
+        return nullptr;
+    return &gWaterfalls[channel];
+}
+
+void ensure_texture(WaterfallState *state)
+{
+    if (state == nullptr || state->texture_width <= 0 || state->texture_height <= 0)
         return;
 
-    if (image_texture == 0xffffffff)
+    if (state->image_texture == 0xffffffff)
     {
-        glGenTextures(1, &image_texture);
-        glBindTexture(GL_TEXTURE_2D, image_texture);
+        glGenTextures(1, &state->image_texture);
+        glBindTexture(GL_TEXTURE_2D, state->image_texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, texture_width, texture_height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, image_storage.data());
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, state->texture_width, state->texture_height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, state->image_storage.data());
         glBindTexture(GL_TEXTURE_2D, 0);
-        texture_dirty = false;
+        state->texture_dirty = false;
         return;
     }
 
-    if (texture_dirty)
+    if (state->texture_dirty)
     {
-        glBindTexture(GL_TEXTURE_2D, image_texture);
+        glBindTexture(GL_TEXTURE_2D, state->image_texture);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texture_width, texture_height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, image_storage.data());
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, state->texture_width, state->texture_height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, state->image_storage.data());
         glBindTexture(GL_TEXTURE_2D, 0);
-        texture_dirty = false;
+        state->texture_dirty = false;
     }
 }
 }
 
-void Init_waterfall(int16_t width, int16_t height)
+void Init_waterfall(int channel, int16_t width, int16_t height)
 {
-    if (width <= 0 || height <= 0)
+    WaterfallState *state = get_waterfall(channel);
+    if (state == nullptr || width <= 0 || height <= 0)
         return;
 
-    const int old_width = texture_width;
-    const int old_height = texture_height;
-    const std::vector<uint16_t> old_storage = image_storage;
-    const bool resized = texture_width != width || texture_height != height;
-    texture_width = width;
-    texture_height = height;
+    const int old_width = state->texture_width;
+    const int old_height = state->texture_height;
+    const std::vector<uint16_t> old_storage = state->image_storage;
+    const bool resized = state->texture_width != width || state->texture_height != height;
+    state->texture_width = width;
+    state->texture_height = height;
 
-    if (resized || image_storage.size() != static_cast<size_t>(texture_width * texture_height))
+    if (resized || state->image_storage.size() != static_cast<size_t>(state->texture_width * state->texture_height))
     {
-        image_storage.assign(static_cast<size_t>(texture_width) * static_cast<size_t>(texture_height), 0);
+        state->image_storage.assign(static_cast<size_t>(state->texture_width) * static_cast<size_t>(state->texture_height), 0);
 
         if (resized && old_width > 0 && old_height > 0 && !old_storage.empty())
         {
-            const int copy_width = old_width < texture_width ? old_width : texture_width;
-            const int copy_height = old_height < texture_height ? old_height : texture_height;
+            const int copy_width = old_width < state->texture_width ? old_width : state->texture_width;
+            const int copy_height = old_height < state->texture_height ? old_height : state->texture_height;
 
             for (int y = 0; y < copy_height; y++)
             {
                 memcpy(
-                    &image_storage[static_cast<size_t>(y) * static_cast<size_t>(texture_width)],
+                    &state->image_storage[static_cast<size_t>(y) * static_cast<size_t>(state->texture_width)],
                     &old_storage[static_cast<size_t>(y) * static_cast<size_t>(old_width)],
                     sizeof(uint16_t) * static_cast<size_t>(copy_width));
             }
         }
 
-        texture_dirty = true;
+        state->texture_dirty = true;
     }
 
-    if (resized && image_texture != 0xffffffff)
+    if (resized && state->image_texture != 0xffffffff)
     {
-        glDeleteTextures(1, &image_texture);
-        image_texture = 0xffffffff;
+        glDeleteTextures(1, &state->image_texture);
+        state->image_texture = 0xffffffff;
     }
 
-    ensure_texture();
+    ensure_texture(state);
 }
 
-void Draw_update(float *pData, uint32_t size)
+void Draw_update(int channel, float *pData, uint32_t size)
 {
-    if (texture_width <= 0 || texture_height <= 0 || pData == nullptr || size == 0)
+    WaterfallState *state = get_waterfall(channel);
+    if (state == nullptr || state->texture_width <= 0 || state->texture_height <= 0 || pData == nullptr || size == 0)
         return;
 
-    row_scratch.assign(static_cast<size_t>(texture_width), 0);
-    for (int i = 0; i < texture_width; i++)
+    state->row_scratch.assign(static_cast<size_t>(state->texture_width), 0);
+    for (int i = 0; i < state->texture_width; i++)
     {
-        const uint32_t source_index = static_cast<uint32_t>((static_cast<uint64_t>(i) * size) / static_cast<uint32_t>(texture_width));
+        const uint32_t source_index = static_cast<uint32_t>((static_cast<uint64_t>(i) * size) / static_cast<uint32_t>(state->texture_width));
         const uint32_t clamped_index = source_index < size ? source_index : size - 1;
-        row_scratch[static_cast<size_t>(i)] = GetColorMap(pData[clamped_index] * 255);
+        state->row_scratch[static_cast<size_t>(i)] = GetColorMap(pData[clamped_index] * 255);
     }
 
-    if (texture_height > 1)
+    if (state->texture_height > 1)
     {
         memmove(
-            &image_storage[static_cast<size_t>(texture_width)],
-            &image_storage[0],
-            sizeof(uint16_t) * static_cast<size_t>(texture_width) * static_cast<size_t>(texture_height - 1));
+            &state->image_storage[static_cast<size_t>(state->texture_width)],
+            &state->image_storage[0],
+            sizeof(uint16_t) * static_cast<size_t>(state->texture_width) * static_cast<size_t>(state->texture_height - 1));
     }
-    memcpy(&image_storage[0], row_scratch.data(), sizeof(uint16_t) * static_cast<size_t>(texture_width));
-    texture_dirty = true;
+    memcpy(&state->image_storage[0], state->row_scratch.data(), sizeof(uint16_t) * static_cast<size_t>(state->texture_width));
+    state->texture_dirty = true;
 }
 
-void Draw_waterfall(ImRect frame_bb)
+void Draw_waterfall(int channel, ImRect frame_bb)
 {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (window->SkipItems)
         return;
 
-    ensure_texture();
-    if (image_texture == 0xffffffff)
+    WaterfallState *state = get_waterfall(channel);
+    ensure_texture(state);
+    if (state == nullptr || state->image_texture == 0xffffffff)
         return;
-    window->DrawList->AddImage((ImTextureID)image_texture, frame_bb.Min, frame_bb.Max, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE);
+    window->DrawList->AddImage((ImTextureID)state->image_texture, frame_bb.Min, frame_bb.Max, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE);
 }
 
 void Draw_vertical_scale(ImRect frame_bb, float seconds_per_row)
@@ -176,13 +193,13 @@ void Draw_vertical_scale(ImRect frame_bb, float seconds_per_row)
     float desired_distance = 25;
     calc_scale(seconds_per_row, desired_distance, &notch_distance, &scale);
 
-    float total_time = seconds_per_row * static_cast<float>(texture_height);
+    float total_time = seconds_per_row * frame_bb.GetHeight();
     int time_magnitude = get_time_magnitude(total_time);
 
     for (int i = 0;; i++)
     {
         float y = floor((float)i * notch_distance);
-        if (y >= texture_height)
+        if (y >= frame_bb.GetHeight())
             break;
 
         bool long_notch = (i % 5) == 0;
@@ -221,18 +238,30 @@ void Draw_vertical_scale(ImRect frame_bb, float seconds_per_row)
 void Shutdown_waterfall()
 {
     glFlush();
-    if (image_texture != 0xffffffff)
+    for (int channel = 0; channel < kWaterfallChannelCapacity; channel++)
     {
-        glDeleteTextures(1, &image_texture);
-        image_texture = 0xffffffff;
+        WaterfallState &state = gWaterfalls[channel];
+        if (state.image_texture != 0xffffffff)
+        {
+            glDeleteTextures(1, &state.image_texture);
+            state.image_texture = 0xffffffff;
+        }
     }
 }
 
-void Reset_waterfall_storage()
+void Reset_waterfall_storage(int channel)
 {
-    if (!image_storage.empty())
+    if (channel < 0)
     {
-        std::fill(image_storage.begin(), image_storage.end(), 0);
-        texture_dirty = true;
+        for (int i = 0; i < kWaterfallChannelCapacity; i++)
+            Reset_waterfall_storage(i);
+        return;
+    }
+
+    WaterfallState *state = get_waterfall(channel);
+    if (state != nullptr && !state->image_storage.empty())
+    {
+        std::fill(state->image_storage.begin(), state->image_storage.end(), 0);
+        state->texture_dirty = true;
     }
 }

@@ -15,8 +15,9 @@ static SDL_AudioDeviceID audioDevice;
 static int32_t buffer_frames = 1024;
 static bool recording = false;
 static pthread_t capture_thread;
+static int input_channels_ = 1;
 
-bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset) {
+bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset, int inputChannels) {
     (void)recordingPreset;
     SDL_Init(SDL_INIT_AUDIO);
 
@@ -24,7 +25,7 @@ bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset) 
     SDL_zero(desired);
     desired.freq = sampleRate;
     desired.format = AUDIO_S16LSB;
-    desired.channels = 1;
+    desired.channels = inputChannels <= 1 ? 1 : 2;
     desired.samples = framesPerBuf;
     desired.callback = NULL;  // We’ll pull manually
 
@@ -34,7 +35,9 @@ bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset) 
         return false;
     }
 
-    uint32_t bufSize = buffer_frames * 2;  // mono 16-bit samples
+    input_channels_ = obtained.channels <= 1 ? 1 : 2;
+    buffer_frames = obtained.samples;
+    uint32_t bufSize = buffer_frames * input_channels_ * 2;
     bufs_ = allocateSampleBufs(bufCount_, bufSize);
     assert(bufs_);
 
@@ -53,13 +56,17 @@ void Audio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ) {
     *pRecQ = recQueue_;
 }
 
+int Audio_getInputChannelCount() {
+    return input_channels_;
+}
+
 static void* capture_thread_fn(void *v) {
     while (recording) {
         sample_buf *buf;
         if (freeQueue_->front(&buf)) {
             freeQueue_->pop();
 
-            int bytesRead = SDL_DequeueAudio(audioDevice, buf->buf_, buffer_frames * 2);
+            int bytesRead = SDL_DequeueAudio(audioDevice, buf->buf_, buffer_frames * input_channels_ * 2);
             if (bytesRead <= 0) continue;
 
             buf->size_ = bytesRead;

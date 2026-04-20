@@ -71,12 +71,28 @@ struct PeakMarker
 
 struct SharedState
 {
+    struct ChannelState
+    {
+        BufferIODouble live_power_raw;
+        BufferIODouble live_line;
+        BufferIODouble peak_hold_raw;
+        BufferIODouble peak_hold_line;
+        PeakMarker peak_markers[5];
+        int peak_marker_count = 0;
+        bool peak_hold_valid = false;
+    };
+
+    ChannelState channels[2];
+    BufferIODouble reference_hold_raw;
+    BufferIODouble reference_hold_line;
+};
+
+struct DisplayChannelState
+{
     BufferIODouble live_power_raw;
     BufferIODouble live_line;
     BufferIODouble peak_hold_raw;
     BufferIODouble peak_hold_line;
-    BufferIODouble reference_hold_raw;
-    BufferIODouble reference_hold_line;
     PeakMarker peak_markers[5];
     int peak_marker_count = 0;
     bool peak_hold_valid = false;
@@ -89,6 +105,8 @@ struct PinchGestureState
     float previous_right_x = 1.0f;
 };
 
+constexpr int kMaxInputChannels = 2;
+
 AppConfig gConfig = MakeDefaultAppConfig();
 std::string gConfigPath;
 std::string gWorkingDirectory;
@@ -96,17 +114,22 @@ bool gConfigLoaded = false;
 bool gConfigDirty = false;
 
 SharedState gSharedState;
+DisplayChannelState gDisplayChannels[kMaxInputChannels];
 std::mutex gStateMutex;
 std::thread gProcessingThread;
 std::atomic<bool> gProcessingThreadStop{false};
 bool gSessionInitialized = false;
 
-Processor *gProcessor = nullptr;
+Processor *gProcessors[kMaxInputChannels] = {nullptr, nullptr};
 ScaleBufferBase *gScaleBufferX = nullptr;
 ChunkerProcessor gChunker;
 
 float gInputSampleRate = 48000.0f;
 float gEffectiveSampleRate = 48000.0f;
+int gRequestedInputChannels = 1;
+int gActiveInputChannels = 1;
+int gDisplayChannelCount = 1;
+bool gInputChannelsFallbackActive = false;
 float gMinFreq = 0.0f;
 float gMaxFreq = 0.0f;
 float gAxisYMin = -130.0f;
@@ -119,10 +142,10 @@ float gWaterfallSecondsPerRow = 0.02f;
 float gWaterfallRowAccumulator = 0.0f;
 
 bool gDisplayPaused = false;
-bool gWaterfallInitialized = false;
+bool gWaterfallInitialized[kMaxInputChannels] = {false, false};
 int gFrequencyPlotWidth = 0;
-int gWaterfallWidth = 0;
-int gWaterfallHeight = 0;
+int gWaterfallWidth[kMaxInputChannels] = {0, 0};
+int gWaterfallHeight[kMaxInputChannels] = {0, 0};
 SettingsPage gSettingsPage = SettingsPage::None;
 bool gSettingsScrollTracking = false;
 bool gSettingsScrollDragging = false;
@@ -139,12 +162,12 @@ HOLDING_STATE gHoldingState = HOLDING_STATE_NO_HOLD;
 bool gCursorActive = false;
 bool gCursorDragging = false;
 float gCursorFrequencyHz = 0.0f;
-float gCursorDb = -120.0f;
+float gCursorDb[kMaxInputChannels] = {-120.0f, -120.0f};
 
-BufferIODouble gScaledPowerY;
-BufferIODouble gScaledPowerXY;
-BufferIODouble gPeakScaledPowerY;
-BufferIODouble gPeakScaledPowerXY;
+BufferIODouble gScaledPowerY[kMaxInputChannels];
+BufferIODouble gScaledPowerXY[kMaxInputChannels];
+BufferIODouble gPeakScaledPowerY[kMaxInputChannels];
+BufferIODouble gPeakScaledPowerXY[kMaxInputChannels];
 BufferIODouble gReferenceScaledPowerY;
 BufferIODouble gReferenceScaledPowerXY;
 
@@ -260,6 +283,112 @@ bool waterfall_visible()
     return gConfig.show_waterfall;
 }
 
+bool spectrum_visible()
+{
+    return gConfig.show_spectrum;
+}
+
+SharedState::ChannelState &channel_state(int channel)
+{
+    return gSharedState.channels[channel];
+}
+
+DisplayChannelState &display_channel_state(int channel)
+{
+    return gDisplayChannels[channel];
+}
+
+int active_input_channel_count()
+{
+    return std::max(1, std::min(gActiveInputChannels, kMaxInputChannels));
+}
+
+bool stereo_input_available()
+{
+    return active_input_channel_count() >= 2;
+}
+
+bool mode_requires_stereo(InputChannelMode mode)
+{
+    return mode != InputChannelMode::Mono;
+}
+
+int requested_input_channel_count_for_mode(InputChannelMode mode)
+{
+    return mode_requires_stereo(mode) ? 2 : 1;
+}
+
+int display_channel_count()
+{
+    return std::max(1, std::min(gDisplayChannelCount, kMaxInputChannels));
+}
+
+bool display_mode_is_split()
+{
+    return gConfig.input_channel_mode == InputChannelMode::StereoIndependent && stereo_input_available();
+}
+
+int display_source_channel(int display_channel)
+{
+    if (!stereo_input_available())
+        return 0;
+
+    if (gConfig.input_channel_mode == InputChannelMode::Right)
+        return 1;
+
+    if (gConfig.input_channel_mode == InputChannelMode::StereoIndependent)
+        return gConfig.swap_stereo_order ? (1 - display_channel) : display_channel;
+
+    return 0;
+}
+
+const char *display_channel_title(int display_channel)
+{
+    if (!stereo_input_available())
+        return "单声道";
+
+    switch (gConfig.input_channel_mode)
+    {
+    case InputChannelMode::Left:
+        return "左声道";
+    case InputChannelMode::Right:
+        return "右声道";
+    case InputChannelMode::StereoMixed:
+        return "双声道混合";
+    case InputChannelMode::StereoIndependent:
+        return display_source_channel(display_channel) == 0 ? "左声道" : "右声道";
+    case InputChannelMode::Mono:
+    default:
+        return "单声道";
+    }
+}
+
+ImU32 display_channel_live_color(int display_channel)
+{
+    if (!stereo_input_available())
+        return IM_COL32(255, 212, 0, 240);
+    if (display_mode_is_split())
+        return display_source_channel(display_channel) == 0 ? IM_COL32(255, 212, 0, 240) : IM_COL32(72, 192, 255, 240);
+    if (gConfig.input_channel_mode == InputChannelMode::Right)
+        return IM_COL32(72, 192, 255, 240);
+    if (gConfig.input_channel_mode == InputChannelMode::StereoMixed)
+        return IM_COL32(120, 255, 170, 240);
+    return IM_COL32(255, 212, 0, 240);
+}
+
+ImU32 display_channel_peak_color(int display_channel)
+{
+    if (!stereo_input_available())
+        return IM_COL32(220, 64, 64, 220);
+    if (display_mode_is_split())
+        return display_source_channel(display_channel) == 0 ? IM_COL32(220, 64, 64, 220) : IM_COL32(64, 160, 220, 220);
+    if (gConfig.input_channel_mode == InputChannelMode::Right)
+        return IM_COL32(64, 160, 220, 220);
+    if (gConfig.input_channel_mode == InputChannelMode::StereoMixed)
+        return IM_COL32(80, 220, 150, 220);
+    return IM_COL32(220, 64, 64, 220);
+}
+
 void clear_frequency_gesture_frame()
 {
     gFrequencyGestureFrame = ImRect();
@@ -274,13 +403,13 @@ void reset_frequency_view_locked()
 
 void rebuild_scale_if_ready_locked()
 {
-    if (gProcessor != nullptr && gFrequencyPlotWidth > 0)
+    if (gProcessors[0] != nullptr && gFrequencyPlotWidth > 0)
         rebuild_scale_locked(gFrequencyPlotWidth);
 }
 
 void apply_frequency_view_locked(float min_freq, float max_freq, bool clear_waterfall)
 {
-    if (gProcessor == nullptr)
+    if (gProcessors[0] == nullptr)
         return;
 
     gAxisFreqMin = std::max(gMinFreq, std::min(min_freq, gMaxFreq));
@@ -300,7 +429,7 @@ void apply_frequency_view_locked(float min_freq, float max_freq, bool clear_wate
 
 bool update_frequency_view_from_pinch_locked(float previous_left_x, float previous_right_x, float current_left_x, float current_right_x)
 {
-    if (gProcessor == nullptr)
+    if (gProcessors[0] == nullptr)
         return false;
 
     const float previous_span = previous_right_x - previous_left_x;
@@ -466,18 +595,139 @@ int map_audio_source_preset(AudioSourceMode mode)
 #endif
 }
 
-void clear_peak_markers_locked()
+int preferred_input_channel_count()
 {
-    for (PeakMarker &marker : gSharedState.peak_markers)
-        marker = PeakMarker{};
-    gSharedState.peak_marker_count = 0;
+    return requested_input_channel_count_for_mode(gConfig.input_channel_mode);
 }
 
-void clear_peak_hold_locked()
+void clear_peak_markers_locked(int channel = -1)
 {
-    gSharedState.peak_hold_raw.Resize(0);
-    gSharedState.peak_hold_line.Resize(0);
-    gSharedState.peak_hold_valid = false;
+    if (channel < 0)
+    {
+        for (int i = 0; i < kMaxInputChannels; i++)
+            clear_peak_markers_locked(i);
+        return;
+    }
+
+    SharedState::ChannelState &state = channel_state(channel);
+    for (PeakMarker &marker : state.peak_markers)
+        marker = PeakMarker{};
+    state.peak_marker_count = 0;
+}
+
+void clear_display_channel_locked(int channel)
+{
+    DisplayChannelState &state = display_channel_state(channel);
+    state.live_power_raw.Resize(0);
+    state.live_line.Resize(0);
+    state.peak_hold_raw.Resize(0);
+    state.peak_hold_line.Resize(0);
+    for (PeakMarker &marker : state.peak_markers)
+        marker = PeakMarker{};
+    state.peak_marker_count = 0;
+    state.peak_hold_valid = false;
+}
+
+void clear_display_channels_locked()
+{
+    for (int channel = 0; channel < kMaxInputChannels; channel++)
+        clear_display_channel_locked(channel);
+    gDisplayChannelCount = 1;
+}
+
+void average_buffers(const BufferIODouble &lhs, const BufferIODouble &rhs, BufferIODouble *out)
+{
+    const int size = std::min(lhs.GetSize(), rhs.GetSize());
+    out->Resize(size);
+    float *out_data = out->GetData();
+    const float *lhs_data = lhs.GetData();
+    const float *rhs_data = rhs.GetData();
+    for (int i = 0; i < size; i++)
+        out_data[i] = (lhs_data[i] + rhs_data[i]) * 0.5f;
+}
+
+void rebuild_display_channels_locked()
+{
+    clear_display_channels_locked();
+
+    if (channel_state(0).live_power_raw.GetSize() <= 0)
+        return;
+
+    if (!stereo_input_available())
+    {
+        display_channel_state(0).live_power_raw.copy(&channel_state(0).live_power_raw);
+        if (channel_state(0).peak_hold_valid)
+        {
+            display_channel_state(0).peak_hold_raw.copy(&channel_state(0).peak_hold_raw);
+            display_channel_state(0).peak_hold_valid = true;
+        }
+        gDisplayChannelCount = 1;
+        return;
+    }
+
+    switch (gConfig.input_channel_mode)
+    {
+    case InputChannelMode::Left:
+    case InputChannelMode::Right:
+    {
+        const int source_channel = gConfig.input_channel_mode == InputChannelMode::Right ? 1 : 0;
+        display_channel_state(0).live_power_raw.copy(&channel_state(source_channel).live_power_raw);
+        if (channel_state(source_channel).peak_hold_valid)
+        {
+            display_channel_state(0).peak_hold_raw.copy(&channel_state(source_channel).peak_hold_raw);
+            display_channel_state(0).peak_hold_valid = true;
+        }
+        gDisplayChannelCount = 1;
+        break;
+    }
+    case InputChannelMode::StereoMixed:
+        average_buffers(channel_state(0).live_power_raw, channel_state(1).live_power_raw, &display_channel_state(0).live_power_raw);
+        if (channel_state(0).peak_hold_valid && channel_state(1).peak_hold_valid)
+        {
+            average_buffers(channel_state(0).peak_hold_raw, channel_state(1).peak_hold_raw, &display_channel_state(0).peak_hold_raw);
+            display_channel_state(0).peak_hold_valid = true;
+        }
+        gDisplayChannelCount = 1;
+        break;
+    case InputChannelMode::StereoIndependent:
+        for (int display_channel = 0; display_channel < 2; display_channel++)
+        {
+            const int source_channel = display_source_channel(display_channel);
+            display_channel_state(display_channel).live_power_raw.copy(&channel_state(source_channel).live_power_raw);
+            if (channel_state(source_channel).peak_hold_valid)
+            {
+                display_channel_state(display_channel).peak_hold_raw.copy(&channel_state(source_channel).peak_hold_raw);
+                display_channel_state(display_channel).peak_hold_valid = true;
+            }
+        }
+        gDisplayChannelCount = 2;
+        break;
+    case InputChannelMode::Mono:
+    default:
+        display_channel_state(0).live_power_raw.copy(&channel_state(0).live_power_raw);
+        if (channel_state(0).peak_hold_valid)
+        {
+            display_channel_state(0).peak_hold_raw.copy(&channel_state(0).peak_hold_raw);
+            display_channel_state(0).peak_hold_valid = true;
+        }
+        gDisplayChannelCount = 1;
+        break;
+    }
+}
+
+void clear_peak_hold_locked(int channel = -1)
+{
+    if (channel < 0)
+    {
+        for (int i = 0; i < kMaxInputChannels; i++)
+            clear_peak_hold_locked(i);
+        return;
+    }
+
+    SharedState::ChannelState &state = channel_state(channel);
+    state.peak_hold_raw.Resize(0);
+    state.peak_hold_line.Resize(0);
+    state.peak_hold_valid = false;
 }
 
 void clear_reference_hold_locked()
@@ -489,36 +739,46 @@ void clear_reference_hold_locked()
 
 void update_cursor_db_locked()
 {
-    if (!gCursorActive || gProcessor == nullptr || gSharedState.live_power_raw.GetSize() <= 0)
+    for (int channel = 0; channel < kMaxInputChannels; channel++)
+        gCursorDb[channel] = -120.0f;
+
+    if (!gCursorActive || gProcessors[0] == nullptr)
         return;
 
-    int bin = static_cast<int>(roundf(gProcessor->freq2Bin(gCursorFrequencyHz)));
-    bin = std::max(1, std::min(bin, gSharedState.live_power_raw.GetSize() - 1));
-    gCursorDb = power_to_db(gSharedState.live_power_raw.GetData()[bin]);
+    for (int channel = 0; channel < display_channel_count(); channel++)
+    {
+        const DisplayChannelState &state = display_channel_state(channel);
+        if (state.live_power_raw.GetSize() <= 0)
+            continue;
+
+        int bin = static_cast<int>(roundf(gProcessors[0]->freq2Bin(gCursorFrequencyHz)));
+        bin = std::max(1, std::min(bin, state.live_power_raw.GetSize() - 1));
+        gCursorDb[channel] = power_to_db(state.live_power_raw.GetData()[bin]);
+    }
 }
 
 void apply_frequency_axis_defaults_locked()
 {
-    gMinFreq = gProcessor != nullptr ? gProcessor->bin2Freq(1) : 0.0f;
-    gMaxFreq = gProcessor != nullptr ? gProcessor->bin2Freq(gProcessor->getBinCount() - 1) : 0.0f;
+    gMinFreq = gProcessors[0] != nullptr ? gProcessors[0]->bin2Freq(1) : 0.0f;
+    gMaxFreq = gProcessors[0] != nullptr ? gProcessors[0]->bin2Freq(gProcessors[0]->getBinCount() - 1) : 0.0f;
     reset_frequency_view_locked();
 }
 
 void rebuild_scale_locked(int outputWidth)
 {
-    if (outputWidth <= 0 || gProcessor == nullptr)
+    if (outputWidth <= 0 || gProcessors[0] == nullptr)
         return;
 
     delete gScaleBufferX;
     gScaleBufferX = new ScaleBufferXCurve(gConfig.frequency_axis_scale);
 
     gScaleBufferX->setOutputWidth(outputWidth, gAxisFreqMin, gAxisFreqMax);
-    gScaleBufferX->PreBuild(gProcessor);
+    gScaleBufferX->PreBuild(gProcessors[0]);
 }
 
 void generate_spectrum_lines_from_bin_data(BufferIODouble *pBins, BufferIODouble *pLines)
 {
-    if (pBins == nullptr || pLines == nullptr || gScaleBufferX == nullptr || gProcessor == nullptr)
+    if (pBins == nullptr || pLines == nullptr || gScaleBufferX == nullptr || gProcessors[0] == nullptr)
         return;
 
     float *pDataIn = pBins->GetData();
@@ -527,17 +787,20 @@ void generate_spectrum_lines_from_bin_data(BufferIODouble *pBins, BufferIODouble
     int i = 0;
     for (int bin = 1; bin < pBins->GetSize(); bin++)
     {
-        pDataOut[2 * i + 0] = gScaleBufferX->FreqToX(gProcessor->bin2Freq(bin));
+        pDataOut[2 * i + 0] = gScaleBufferX->FreqToX(gProcessors[0]->bin2Freq(bin));
         pDataOut[2 * i + 1] = pDataIn[bin];
         i++;
     }
 }
 
-void update_peak_markers_locked()
+void update_peak_markers_locked(int channel)
 {
-    clear_peak_markers_locked();
+    DisplayChannelState &state = display_channel_state(channel);
+    for (PeakMarker &marker : state.peak_markers)
+        marker = PeakMarker{};
+    state.peak_marker_count = 0;
 
-    if (gProcessor == nullptr || gScaleBufferX == nullptr || gSharedState.live_power_raw.GetSize() < 3)
+    if (gProcessors[0] == nullptr || gScaleBufferX == nullptr || state.live_power_raw.GetSize() < 3)
         return;
 
     const int desired_count = clamp_peak_marker_count(gConfig.peak_marker_count);
@@ -550,12 +813,14 @@ void update_peak_markers_locked()
         float value_db;
     };
 
-    BufferIODouble *source = &gSharedState.live_power_raw;
-    if (gConfig.peak_marker_source_mode == PeakMarkerSourceMode::ShortHold && gSharedState.peak_hold_valid && gSharedState.peak_hold_raw.GetSize() == gSharedState.live_power_raw.GetSize())
-        source = &gSharedState.peak_hold_raw;
+    BufferIODouble *source = &state.live_power_raw;
+    if (gConfig.peak_marker_source_mode == PeakMarkerSourceMode::ShortHold &&
+        state.peak_hold_valid &&
+        state.peak_hold_raw.GetSize() == state.live_power_raw.GetSize())
+        source = &state.peak_hold_raw;
 
-    const int first_bin = std::max(2, static_cast<int>(floorf(gProcessor->freq2Bin(gAxisFreqMin))));
-    const int last_bin = std::min(source->GetSize() - 2, static_cast<int>(ceilf(gProcessor->freq2Bin(gAxisFreqMax))));
+    const int first_bin = std::max(2, static_cast<int>(floorf(gProcessors[0]->freq2Bin(gAxisFreqMin))));
+    const int last_bin = std::min(source->GetSize() - 2, static_cast<int>(ceilf(gProcessors[0]->freq2Bin(gAxisFreqMax))));
     const int minimum_bin_distance = std::max(4, source->GetSize() / 64);
 
     std::vector<PeakCandidate> candidates;
@@ -583,7 +848,7 @@ void update_peak_markers_locked()
         bool too_close = false;
         for (int i = 0; i < active_count; i++)
         {
-            if (abs(gSharedState.peak_markers[i].bin - candidate.bin) < minimum_bin_distance)
+            if (abs(state.peak_markers[i].bin - candidate.bin) < minimum_bin_distance)
             {
                 too_close = true;
                 break;
@@ -592,10 +857,10 @@ void update_peak_markers_locked()
         if (too_close)
             continue;
 
-        PeakMarker &marker = gSharedState.peak_markers[active_count];
+        PeakMarker &marker = state.peak_markers[active_count];
         marker.active = true;
         marker.bin = candidate.bin;
-        marker.freq_hz = gProcessor->bin2Freq(candidate.bin);
+        marker.freq_hz = gProcessors[0]->bin2Freq(candidate.bin);
         marker.value_db = candidate.value_db;
         marker.normalized_x = gScaleBufferX->FreqToX(marker.freq_hz);
         marker.normalized_y = normalized_db(candidate.value_db);
@@ -604,25 +869,36 @@ void update_peak_markers_locked()
             break;
     }
 
-    gSharedState.peak_marker_count = active_count;
+    state.peak_marker_count = active_count;
 }
 
 void refresh_display_state_locked(bool updateWaterfall)
 {
-    if (gProcessor == nullptr || gSharedState.live_power_raw.GetSize() == 0 || gScaleBufferX == nullptr)
+    if (gProcessors[0] == nullptr || gScaleBufferX == nullptr)
         return;
 
-    applyScaleY(&gSharedState.live_power_raw, gAxisYMin, gAxisYMax, true, &gScaledPowerY);
-    generate_spectrum_lines_from_bin_data(&gScaledPowerY, &gSharedState.live_line);
+    rebuild_display_channels_locked();
 
-    if (gConfig.max_hold_trace_enabled && gSharedState.peak_hold_valid)
+    for (int channel = 0; channel < display_channel_count(); channel++)
     {
-        applyScaleY(&gSharedState.peak_hold_raw, gAxisYMin, gAxisYMax, true, &gPeakScaledPowerY);
-        generate_spectrum_lines_from_bin_data(&gPeakScaledPowerY, &gSharedState.peak_hold_line);
-    }
-    else
-    {
-        gSharedState.peak_hold_line.Resize(0);
+        DisplayChannelState &state = display_channel_state(channel);
+        if (state.live_power_raw.GetSize() == 0)
+            continue;
+
+        applyScaleY(&state.live_power_raw, gAxisYMin, gAxisYMax, true, &gScaledPowerY[channel]);
+        generate_spectrum_lines_from_bin_data(&gScaledPowerY[channel], &state.live_line);
+
+        if (gConfig.max_hold_trace_enabled && state.peak_hold_valid)
+        {
+            applyScaleY(&state.peak_hold_raw, gAxisYMin, gAxisYMax, true, &gPeakScaledPowerY[channel]);
+            generate_spectrum_lines_from_bin_data(&gPeakScaledPowerY[channel], &state.peak_hold_line);
+        }
+        else
+        {
+            state.peak_hold_line.Resize(0);
+        }
+
+        update_peak_markers_locked(channel);
     }
 
     if (gHoldingState == HOLDING_STATE_READY && gSharedState.reference_hold_raw.GetSize() > 0)
@@ -635,13 +911,17 @@ void refresh_display_state_locked(bool updateWaterfall)
         gSharedState.reference_hold_line.Resize(0);
     }
 
-    update_peak_markers_locked();
     update_cursor_db_locked();
 
-    if (updateWaterfall && waterfall_visible() && gWaterfallWidth > 0)
+    if (updateWaterfall && waterfall_visible())
     {
-        gScaleBufferX->Build(&gScaledPowerY, &gScaledPowerXY);
-        Draw_update(gScaledPowerXY.GetData(), gScaledPowerXY.GetSize());
+        for (int channel = 0; channel < display_channel_count(); channel++)
+        {
+            if (gWaterfallWidth[channel] <= 0)
+                continue;
+            gScaleBufferX->Build(&gScaledPowerY[channel], &gScaledPowerXY[channel]);
+            Draw_update(channel, gScaledPowerXY[channel].GetData(), gScaledPowerXY[channel].GetSize());
+        }
     }
 }
 
@@ -652,11 +932,14 @@ void stop_processing_session()
         gProcessingThread.join();
 
     std::lock_guard<std::mutex> lock(gStateMutex);
-    if (gProcessor != nullptr)
+    if (gProcessors[0] != nullptr)
     {
         gChunker.end();
-        delete gProcessor;
-        gProcessor = nullptr;
+        for (int channel = 0; channel < kMaxInputChannels; channel++)
+        {
+            delete gProcessors[channel];
+            gProcessors[channel] = nullptr;
+        }
         Audio_deinit();
     }
     gProcessingThreadStop.store(false);
@@ -669,43 +952,47 @@ void processing_loop()
         int processed_frames = 0;
         {
             std::lock_guard<std::mutex> lock(gStateMutex);
-            while (gProcessor != nullptr && gChunker.Process(gProcessor, gHopSamples))
+            while (gProcessors[0] != nullptr && gChunker.Process(gProcessors, active_input_channel_count(), gHopSamples))
             {
-                gProcessor->computePower(gConfig.exponential_smoothing_factor);
-                BufferIODouble *power = gProcessor->getBufferIO();
-                gSharedState.live_power_raw.copy(power);
-
-                if (gConfig.max_hold_trace_enabled)
+                for (int channel = 0; channel < active_input_channel_count(); channel++)
                 {
-                    if (!gSharedState.peak_hold_valid || gSharedState.peak_hold_raw.GetSize() != power->GetSize())
+                    SharedState::ChannelState &state = channel_state(channel);
+                    gProcessors[channel]->computePower(gConfig.exponential_smoothing_factor);
+                    BufferIODouble *power = gProcessors[channel]->getBufferIO();
+                    state.live_power_raw.copy(power);
+
+                    if (gConfig.max_hold_trace_enabled)
                     {
-                        gSharedState.peak_hold_raw.copy(power);
-                        gSharedState.peak_hold_valid = true;
-                    }
-                    else
-                    {
-                        float *peak_data = gSharedState.peak_hold_raw.GetData();
-                        float *live_data = power->GetData();
-                        for (int i = 0; i < power->GetSize(); i++)
+                        if (!state.peak_hold_valid || state.peak_hold_raw.GetSize() != power->GetSize())
                         {
-                            const float live_db = power_to_db(live_data[i]);
-                            if (gConfig.peak_hold_falloff_seconds <= 0.0f)
+                            state.peak_hold_raw.copy(power);
+                            state.peak_hold_valid = true;
+                        }
+                        else
+                        {
+                            float *peak_data = state.peak_hold_raw.GetData();
+                            float *live_data = power->GetData();
+                            for (int i = 0; i < power->GetSize(); i++)
                             {
-                                const float held_db = power_to_db(peak_data[i]);
-                                peak_data[i] = db_to_power(std::max(live_db, held_db));
-                            }
-                            else
-                            {
-                                const float falloff_db = (90.0f * gAnalysisSecondsPerFrame) / gConfig.peak_hold_falloff_seconds;
-                                const float held_db = power_to_db(peak_data[i]) - falloff_db;
-                                peak_data[i] = db_to_power(std::max(live_db, held_db));
+                                const float live_db = power_to_db(live_data[i]);
+                                if (gConfig.peak_hold_falloff_seconds <= 0.0f)
+                                {
+                                    const float held_db = power_to_db(peak_data[i]);
+                                    peak_data[i] = db_to_power(std::max(live_db, held_db));
+                                }
+                                else
+                                {
+                                    const float falloff_db = (90.0f * gAnalysisSecondsPerFrame) / gConfig.peak_hold_falloff_seconds;
+                                    const float held_db = power_to_db(peak_data[i]) - falloff_db;
+                                    peak_data[i] = db_to_power(std::max(live_db, held_db));
+                                }
                             }
                         }
                     }
-                }
-                else
-                {
-                    clear_peak_hold_locked();
+                    else
+                    {
+                        clear_peak_hold_locked(channel);
+                    }
                 }
 
                 bool update_waterfall = false;
@@ -745,31 +1032,46 @@ void start_processing_session()
     std::lock_guard<std::mutex> lock(gStateMutex);
 
     const int preferred_sample_rate = configured_sample_rate();
+    gRequestedInputChannels = preferred_input_channel_count();
+    gActiveInputChannels = 1;
+    gDisplayChannelCount = 1;
+    gInputChannelsFallbackActive = false;
     bool audio_started = false;
-    for (int candidate_rate : sample_rate_fallbacks(preferred_sample_rate))
+    const int channel_candidates[2] = {gRequestedInputChannels, 1};
+    const int channel_candidate_count = gRequestedInputChannels >= 2 ? 2 : 1;
+    for (int candidate_index = 0; candidate_index < channel_candidate_count; candidate_index++)
     {
-        if (!Audio_init(static_cast<unsigned int>(candidate_rate), kAudioBufferLength, map_audio_source_preset(gConfig.audio_source_mode)))
-            continue;
-        if (!Audio_startPlay())
-        {
-            Audio_deinit();
-            continue;
-        }
+        const int candidate_channels = channel_candidates[candidate_index];
 
-        gInputSampleRate = static_cast<float>(candidate_rate);
-        if (gConfig.sampling_rate_mode == SamplingRateMode::Fixed && gConfig.sample_rate_hz != candidate_rate)
+        for (int candidate_rate : sample_rate_fallbacks(preferred_sample_rate))
         {
-            gConfig.sample_rate_hz = candidate_rate;
-            gConfigDirty = true;
+            if (!Audio_init(static_cast<unsigned int>(candidate_rate), kAudioBufferLength, map_audio_source_preset(gConfig.audio_source_mode), candidate_channels))
+                continue;
+            if (!Audio_startPlay())
+            {
+                Audio_deinit();
+                continue;
+            }
+
+            gInputSampleRate = static_cast<float>(candidate_rate);
+            gActiveInputChannels = Audio_getInputChannelCount();
+            gInputChannelsFallbackActive = gActiveInputChannels < gRequestedInputChannels;
+            if (gConfig.sampling_rate_mode == SamplingRateMode::Fixed && gConfig.sample_rate_hz != candidate_rate)
+            {
+                gConfig.sample_rate_hz = candidate_rate;
+                gConfigDirty = true;
+            }
+            audio_started = true;
+            break;
         }
-        audio_started = true;
-        break;
+        if (audio_started)
+            break;
     }
 
     if (!audio_started)
         return;
 
-    gEffectiveSampleRate = GetEffectiveSampleRate(gConfig);
+    gEffectiveSampleRate = gInputSampleRate / static_cast<float>(GetDecimationFactor(gConfig));
     const float analysis_interval_ms = std::min(clamp_transform_interval_ms(gConfig.desired_transform_interval_ms), 20.0f);
     gHopSamples = std::max(1, static_cast<int>(roundf((analysis_interval_ms / 1000.0f) * gInputSampleRate)));
     gAnalysisSecondsPerFrame = gHopSamples / gInputSampleRate;
@@ -779,20 +1081,39 @@ void start_processing_session()
     AudioQueue *pFreeQueue = nullptr;
     AudioQueue *pRecQueue = nullptr;
     Audio_getBufferQueues(&pFreeQueue, &pRecQueue);
-    gChunker.SetQueues(pRecQueue, pFreeQueue);
+    gChunker.SetQueues(pRecQueue, pFreeQueue, gActiveInputChannels);
     gChunker.begin();
 
-    gProcessor = new myFFT();
-    gProcessor->init(gConfig.fft_size, gInputSampleRate, GetDecimationFactor(gConfig), gConfig.window_function);
+    for (int channel = 0; channel < kMaxInputChannels; channel++)
+    {
+        delete gProcessors[channel];
+        gProcessors[channel] = nullptr;
+    }
+    for (int channel = 0; channel < active_input_channel_count(); channel++)
+    {
+        gProcessors[channel] = new myFFT();
+        gProcessors[channel]->init(gConfig.fft_size, gInputSampleRate, GetDecimationFactor(gConfig), gConfig.window_function);
+    }
+
     apply_frequency_axis_defaults_locked();
     if (gFrequencyPlotWidth > 0)
         rebuild_scale_locked(gFrequencyPlotWidth);
 
-    gSharedState.live_power_raw.Resize(gProcessor->getBinCount());
-    gSharedState.live_power_raw.clear();
+    for (int channel = 0; channel < active_input_channel_count(); channel++)
+    {
+        channel_state(channel).live_power_raw.Resize(gProcessors[channel]->getBinCount());
+        channel_state(channel).live_power_raw.clear();
+        channel_state(channel).live_line.Resize(0);
+    }
+    for (int channel = active_input_channel_count(); channel < kMaxInputChannels; channel++)
+    {
+        channel_state(channel).live_power_raw.Resize(0);
+        channel_state(channel).live_line.Resize(0);
+    }
 
     clear_peak_hold_locked();
     clear_peak_markers_locked();
+    clear_display_channels_locked();
     Reset_waterfall_storage();
 
     gProcessingThreadStop.store(false);
@@ -860,10 +1181,10 @@ void apply_display_change(bool rebuildScale, bool clearWaterfall)
 void copy_current_to_reference()
 {
     std::lock_guard<std::mutex> lock(gStateMutex);
-    if (gSharedState.live_power_raw.GetSize() == 0)
+    if (display_channel_state(0).live_power_raw.GetSize() == 0)
         return;
 
-    gSharedState.reference_hold_raw.copy(&gSharedState.live_power_raw);
+    gSharedState.reference_hold_raw.copy(&display_channel_state(0).live_power_raw);
     gHoldingState = HOLDING_STATE_READY;
     refresh_display_state_locked(false);
 }
@@ -884,6 +1205,37 @@ const char *audio_source_label(AudioSourceMode mode)
     default:
         return "未处理";
     }
+}
+
+const char *input_channel_label(InputChannelMode mode)
+{
+    switch (mode)
+    {
+    case InputChannelMode::Mono:
+        return "单声道";
+    case InputChannelMode::Left:
+        return "只看左声道";
+    case InputChannelMode::Right:
+        return "只看右声道";
+    case InputChannelMode::StereoMixed:
+        return "双声道混合";
+    case InputChannelMode::StereoIndependent:
+    default:
+        return "双声道独立";
+    }
+}
+
+const char *runtime_input_channel_status_label()
+{
+    static char buffer[64];
+    if (gInputChannelsFallbackActive)
+    {
+        snprintf(buffer, sizeof(buffer), "实际单声道（双声道回退）");
+        return buffer;
+    }
+
+    snprintf(buffer, sizeof(buffer), "实际%s", active_input_channel_count() >= 2 ? "双声道" : "单声道");
+    return buffer;
 }
 
 const char *sampling_rate_label(SamplingRateMode mode, int sampleRate)
@@ -936,11 +1288,20 @@ const char *waterfall_size_label(WaterfallSizeMode mode)
 {
     switch (mode)
     {
+    case WaterfallSizeMode::OneQuarter:
+        return "1/4 屏";
     case WaterfallSizeMode::OneThird:
         return "1/3 屏";
+    case WaterfallSizeMode::TwoFifths:
+        return "2/5 屏";
     case WaterfallSizeMode::OneHalf:
         return "1/2 屏";
+    case WaterfallSizeMode::ThreeFifths:
+        return "3/5 屏";
     case WaterfallSizeMode::TwoThirds:
+        return "2/3 屏";
+    case WaterfallSizeMode::ThreeQuarters:
+        return "3/4 屏";
     default:
         return "2/3 屏";
     }
@@ -1119,6 +1480,49 @@ void render_settings_page()
                 ImGui::SetItemDefaultFocus();
         }
         ImGui::EndCombo();
+    }
+
+    render_setting_label("声道模式");
+    set_full_width_item();
+    if (ImGui::BeginCombo("##input_channel_mode", input_channel_label(gConfig.input_channel_mode)))
+    {
+        const InputChannelMode items[] = {
+            InputChannelMode::Mono,
+            InputChannelMode::Left,
+            InputChannelMode::Right,
+            InputChannelMode::StereoMixed,
+            InputChannelMode::StereoIndependent,
+        };
+        for (InputChannelMode mode : items)
+        {
+            const bool selected = gConfig.input_channel_mode == mode;
+            if (ImGui::Selectable(input_channel_label(mode), selected))
+            {
+                const bool requires_restart = requested_input_channel_count_for_mode(gConfig.input_channel_mode) !=
+                                              requested_input_channel_count_for_mode(mode);
+                gConfig.input_channel_mode = mode;
+                mark_config_dirty();
+                if (requires_restart)
+                    restart_processing_session();
+                else
+                    apply_display_change(false, true);
+            }
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::TextDisabled("%s", runtime_input_channel_status_label());
+
+    if (gConfig.input_channel_mode == InputChannelMode::StereoIndependent)
+    {
+        bool swap_stereo_order = gConfig.swap_stereo_order;
+        if (ImGui::Checkbox("交换左右顺序", &swap_stereo_order))
+        {
+            gConfig.swap_stereo_order = swap_stereo_order;
+            mark_config_dirty();
+            apply_display_change(false, true);
+        }
     }
 
     render_setting_label("采样率");
@@ -1331,10 +1735,22 @@ void render_settings_page()
     }
 
     render_section_title("瀑布图");
+    bool show_spectrum = gConfig.show_spectrum;
+    if (ImGui::Checkbox("显示上方频谱图", &show_spectrum))
+    {
+        gConfig.show_spectrum = show_spectrum;
+        if (!gConfig.show_spectrum && !gConfig.show_waterfall)
+            gConfig.show_waterfall = true;
+        mark_config_dirty();
+        apply_display_change(false, false);
+    }
+
     bool show_waterfall = gConfig.show_waterfall;
     if (ImGui::Checkbox("显示瀑布图", &show_waterfall))
     {
         gConfig.show_waterfall = show_waterfall;
+        if (!gConfig.show_spectrum && !gConfig.show_waterfall)
+            gConfig.show_spectrum = true;
         mark_config_dirty();
         apply_display_change(false, false);
     }
@@ -1344,9 +1760,13 @@ void render_settings_page()
     if (ImGui::BeginCombo("##waterfall_size", waterfall_size_label(gConfig.waterfall_size_mode)))
     {
         const WaterfallSizeMode items[] = {
+            WaterfallSizeMode::OneQuarter,
             WaterfallSizeMode::OneThird,
+            WaterfallSizeMode::TwoFifths,
             WaterfallSizeMode::OneHalf,
+            WaterfallSizeMode::ThreeFifths,
             WaterfallSizeMode::TwoThirds,
+            WaterfallSizeMode::ThreeQuarters,
         };
         for (WaterfallSizeMode mode : items)
         {
@@ -1429,14 +1849,22 @@ void draw_toolbar()
     }
     char axis_min_label[32];
     char axis_max_label[32];
-    char status[160];
+    char channel_status[64];
+    char status[256];
     format_frequency(axis_min_label, sizeof(axis_min_label), axis_min);
     format_frequency(axis_max_label, sizeof(axis_max_label), axis_max);
     snprintf(
+        channel_status,
+        sizeof(channel_status),
+        "%s",
+        gInputChannelsFallbackActive ? "单声道（双声道回退）" : (active_input_channel_count() >= 2 ? "双声道" : "单声道"));
+    snprintf(
         status,
         sizeof(status),
-        "输入 %.0f Hz  ·  视图 %s - %s  ·  FFT %d  ·  %.1f Hz/bin",
+        "输入 %.0f Hz / %s / %s  ·  视图 %s - %s  ·  FFT %d  ·  %.1f Hz/bin",
         gInputSampleRate,
+        input_channel_label(gConfig.input_channel_mode),
+        channel_status,
         axis_min_label,
         axis_max_label,
         gConfig.fft_size,
@@ -1495,7 +1923,7 @@ void draw_hold_popup()
     ImGui::EndPopup();
 }
 
-void update_cursor_state(const ImRect &spectrumFrame, bool spectrumHovered, const ImRect &waterfallFrame, bool waterfallHovered)
+void update_cursor_state(const ImRect &spectrumFrame, bool spectrumHovered, const ImRect *waterfallFrames, const bool *waterfallHovered, int waterfallCount)
 {
     if (gPinchGesture.active)
     {
@@ -1503,7 +1931,17 @@ void update_cursor_state(const ImRect &spectrumFrame, bool spectrumHovered, cons
         return;
     }
 
-    const bool hovered = spectrumHovered || waterfallHovered;
+    bool hovered = spectrumHovered;
+    int hoveredWaterfallIndex = -1;
+    for (int channel = 0; channel < waterfallCount; channel++)
+    {
+        if (waterfallHovered[channel])
+        {
+            hovered = true;
+            hoveredWaterfallIndex = channel;
+            break;
+        }
+    }
     const bool mouseDown = ImGui::IsMouseDown(0);
 
     if (hovered && ImGui::IsMouseClicked(0))
@@ -1514,7 +1952,7 @@ void update_cursor_state(const ImRect &spectrumFrame, bool spectrumHovered, cons
     if (!gCursorDragging)
         return;
 
-    const ImRect &activeFrame = spectrumHovered ? spectrumFrame : waterfallFrame;
+    const ImRect &activeFrame = spectrumHovered || hoveredWaterfallIndex < 0 ? spectrumFrame : waterfallFrames[hoveredWaterfallIndex];
     const float x = clamp(unlerp(activeFrame.Min.x, activeFrame.Max.x, ImGui::GetIO().MousePos.x), 0.0f, 1.0f);
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
@@ -1530,57 +1968,101 @@ void update_cursor_state(const ImRect &spectrumFrame, bool spectrumHovered, cons
 void draw_peak_markers(const ImRect &frame_bb)
 {
     std::lock_guard<std::mutex> lock(gStateMutex);
-    for (int i = 0; i < gSharedState.peak_marker_count; i++)
+    for (int channel = 0; channel < display_channel_count(); channel++)
     {
-        const PeakMarker &marker = gSharedState.peak_markers[i];
-        if (!marker.active)
-            continue;
+        const DisplayChannelState &state = display_channel_state(channel);
+        const ImU32 marker_color = display_channel_live_color(channel);
+        for (int i = 0; i < state.peak_marker_count; i++)
+        {
+            const PeakMarker &marker = state.peak_markers[i];
+            if (!marker.active)
+                continue;
 
-        const float x = lerp(marker.normalized_x, frame_bb.Min.x, frame_bb.Max.x);
-        const float y = lerp(marker.normalized_y, frame_bb.Max.y, frame_bb.Min.y);
-        char label[96];
-        char freq[48];
-        format_frequency(freq, sizeof(freq), marker.freq_hz);
-        snprintf(label, sizeof(label), "%s\n%.0f dB", freq, marker.value_db);
-        ImVec2 labelPos(x + 8.0f, std::max(frame_bb.Min.y + 8.0f, y - 28.0f - i * 18.0f));
+            const float x = lerp(marker.normalized_x, frame_bb.Min.x, frame_bb.Max.x);
+            const float y = lerp(marker.normalized_y, frame_bb.Max.y, frame_bb.Min.y);
+            char label[112];
+            char freq[48];
+            format_frequency(freq, sizeof(freq), marker.freq_hz);
+            if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
+                snprintf(label, sizeof(label), "%s %s\n%.0f dB", display_channel_title(channel), freq, marker.value_db);
+            else
+                snprintf(label, sizeof(label), "%s\n%.0f dB", freq, marker.value_db);
+            ImVec2 labelPos(x + 8.0f, std::max(frame_bb.Min.y + 8.0f, y - 28.0f - (i + channel * 2) * 18.0f));
 
-        ImGui::GetWindowDrawList()->AddLine(ImVec2(x, frame_bb.Min.y), ImVec2(x, frame_bb.Max.y), IM_COL32(72, 192, 255, 160));
-        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(x, y), 5.0f, IM_COL32(72, 192, 255, 255));
-        ImGui::GetWindowDrawList()->AddText(labelPos, IM_COL32(72, 192, 255, 255), label);
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(x, frame_bb.Min.y), ImVec2(x, frame_bb.Max.y), marker_color, 1.0f);
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(x, y), 5.0f, marker_color);
+            ImGui::GetWindowDrawList()->AddText(labelPos, marker_color, label);
+        }
     }
 }
 
-void draw_cursor(const ImRect &spectrumFrame, const ImRect &waterfallFrame)
+void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int waterfallCount)
 {
     std::lock_guard<std::mutex> lock(gStateMutex);
     if (!gCursorActive || gScaleBufferX == nullptr)
         return;
 
     char freqLabel[48];
-    char dbLabel[48];
+    char dbLabels[kMaxInputChannels][48];
     format_frequency(freqLabel, sizeof(freqLabel), gCursorFrequencyHz);
-    snprintf(dbLabel, sizeof(dbLabel), "%.1f dB", gCursorDb);
+    for (int channel = 0; channel < display_channel_count(); channel++)
+    {
+        if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
+            snprintf(dbLabels[channel], sizeof(dbLabels[channel]), "%s %.1f dB", display_channel_title(channel), gCursorDb[channel]);
+        else
+            snprintf(dbLabels[channel], sizeof(dbLabels[channel]), "%.1f dB", gCursorDb[channel]);
+    }
 
     const float normalized_x = gScaleBufferX->FreqToX(gCursorFrequencyHz);
     if (normalized_x < 0.0f || normalized_x > 1.0f)
         return;
-    const float spectrum_x = lerp(normalized_x, spectrumFrame.Min.x, spectrumFrame.Max.x);
-    const bool draw_waterfall_cursor = waterfall_visible() && waterfallFrame.GetWidth() > 0.0f && waterfallFrame.GetHeight() > 0.0f;
-    const float waterfall_x = draw_waterfall_cursor ? lerp(normalized_x, waterfallFrame.Min.x, waterfallFrame.Max.x) : 0.0f;
+
+    ImRect anchorFrame = spectrumFrame;
+    if (anchorFrame.GetWidth() <= 0.0f || anchorFrame.GetHeight() <= 0.0f)
+    {
+        for (int channel = 0; channel < waterfallCount; channel++)
+        {
+            if (waterfallFrames[channel].GetWidth() > 0.0f && waterfallFrames[channel].GetHeight() > 0.0f)
+            {
+                anchorFrame = waterfallFrames[channel];
+                break;
+            }
+        }
+    }
+    if (anchorFrame.GetWidth() <= 0.0f || anchorFrame.GetHeight() <= 0.0f)
+        return;
+
+    const float anchor_x = lerp(normalized_x, anchorFrame.Min.x, anchorFrame.Max.x);
     const ImU32 cursorColor = IM_COL32(70, 255, 180, 255);
     const ImVec2 freqSize = ImGui::CalcTextSize(freqLabel);
-    const ImVec2 dbSize = ImGui::CalcTextSize(dbLabel);
-    const float boxWidth = std::max(freqSize.x, dbSize.x) + 16.0f;
-    const float boxHeight = freqSize.y + dbSize.y + 18.0f;
-    float boxX = spectrum_x + 10.0f;
-    if (boxX + boxWidth > spectrumFrame.Max.x - 4.0f)
-        boxX = spectrum_x - boxWidth - 10.0f;
-    boxX = std::max(spectrumFrame.Min.x + 4.0f, std::min(boxX, spectrumFrame.Max.x - boxWidth - 4.0f));
-    const float boxY = spectrumFrame.Min.y + 8.0f;
+    float boxWidth = freqSize.x + 16.0f;
+    float boxHeight = freqSize.y + 12.0f;
+    ImVec2 dbSizes[kMaxInputChannels];
+    for (int channel = 0; channel < display_channel_count(); channel++)
+    {
+        dbSizes[channel] = ImGui::CalcTextSize(dbLabels[channel]);
+        boxWidth = std::max(boxWidth, dbSizes[channel].x + 16.0f);
+        boxHeight += dbSizes[channel].y + 4.0f;
+    }
+    boxHeight += 6.0f;
+    float boxX = anchor_x + 10.0f;
+    if (boxX + boxWidth > anchorFrame.Max.x - 4.0f)
+        boxX = anchor_x - boxWidth - 10.0f;
+    boxX = std::max(anchorFrame.Min.x + 4.0f, std::min(boxX, anchorFrame.Max.x - boxWidth - 4.0f));
+    const float boxY = anchorFrame.Min.y + 8.0f;
 
-    ImGui::GetWindowDrawList()->AddLine(ImVec2(spectrum_x, spectrumFrame.Min.y), ImVec2(spectrum_x, spectrumFrame.Max.y), cursorColor, 1.5f);
-    if (draw_waterfall_cursor)
-        ImGui::GetWindowDrawList()->AddLine(ImVec2(waterfall_x, waterfallFrame.Min.y), ImVec2(waterfall_x, waterfallFrame.Max.y), cursorColor, 1.5f);
+    if (spectrumFrame.GetWidth() > 0.0f && spectrumFrame.GetHeight() > 0.0f)
+    {
+        const float spectrum_x = lerp(normalized_x, spectrumFrame.Min.x, spectrumFrame.Max.x);
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(spectrum_x, spectrumFrame.Min.y), ImVec2(spectrum_x, spectrumFrame.Max.y), cursorColor, 1.5f);
+    }
+    for (int channel = 0; channel < waterfallCount; channel++)
+    {
+        if (waterfallFrames[channel].GetWidth() <= 0.0f || waterfallFrames[channel].GetHeight() <= 0.0f)
+            continue;
+        const float waterfall_x = lerp(normalized_x, waterfallFrames[channel].Min.x, waterfallFrames[channel].Max.x);
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(waterfall_x, waterfallFrames[channel].Min.y), ImVec2(waterfall_x, waterfallFrames[channel].Max.y), cursorColor, 1.5f);
+    }
     ImGui::GetWindowDrawList()->AddRectFilled(
         ImVec2(boxX, boxY),
         ImVec2(boxX + boxWidth, boxY + boxHeight),
@@ -1592,25 +2074,36 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect &waterfallFrame)
         IM_COL32(70, 255, 180, 140),
         6.0f);
     ImGui::GetWindowDrawList()->AddText(ImVec2(boxX + 8.0f, boxY + 5.0f), cursorColor, freqLabel);
-    ImGui::GetWindowDrawList()->AddText(ImVec2(boxX + 8.0f, boxY + 9.0f + freqSize.y), cursorColor, dbLabel);
+    float textY = boxY + 9.0f + freqSize.y;
+    for (int channel = 0; channel < display_channel_count(); channel++)
+    {
+        ImGui::GetWindowDrawList()->AddText(ImVec2(boxX + 8.0f, textY), display_channel_live_color(channel), dbLabels[channel]);
+        textY += dbSizes[channel].y + 4.0f;
+    }
 }
 
 void draw_spectrum(const ImRect &frame_bb)
 {
-    BufferIODouble liveLine;
-    BufferIODouble peakLine;
+    BufferIODouble liveLines[kMaxInputChannels];
+    BufferIODouble peakLines[kMaxInputChannels];
     BufferIODouble referenceLine;
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
-        liveLine.copy(&gSharedState.live_line);
-        peakLine.copy(&gSharedState.peak_hold_line);
+        for (int channel = 0; channel < display_channel_count(); channel++)
+        {
+            liveLines[channel].copy(&display_channel_state(channel).live_line);
+            peakLines[channel].copy(&display_channel_state(channel).peak_hold_line);
+        }
         referenceLine.copy(&gSharedState.reference_hold_line);
     }
 
-    if (liveLine.GetSize() > 0)
-        draw_lines(frame_bb, liveLine.GetData(), liveLine.GetSize() / 2, IM_COL32(255, 212, 0, 240), 0, 1);
-    if (gConfig.max_hold_trace_enabled && peakLine.GetSize() > 0)
-        draw_lines(frame_bb, peakLine.GetData(), peakLine.GetSize() / 2, IM_COL32(220, 64, 64, 220), 0, 1);
+    for (int channel = 0; channel < display_channel_count(); channel++)
+    {
+        if (liveLines[channel].GetSize() > 0)
+            draw_lines(frame_bb, liveLines[channel].GetData(), liveLines[channel].GetSize() / 2, display_channel_live_color(channel), 0, 1);
+        if (gConfig.max_hold_trace_enabled && peakLines[channel].GetSize() > 0)
+            draw_lines(frame_bb, peakLines[channel].GetData(), peakLines[channel].GetSize() / 2, display_channel_peak_color(channel), 0, 1);
+    }
     if (referenceLine.GetSize() > 0)
         draw_lines(frame_bb, referenceLine.GetData(), referenceLine.GetSize() / 2, IM_COL32(128, 64, 220, 220), 0, 1);
 
@@ -1618,6 +2111,17 @@ void draw_spectrum(const ImRect &frame_bb)
         draw_frequency_scale(frame_bb, gScaleBufferX, gConfig.frequency_axis_scale);
     draw_scale_y(frame_bb, gAxisYMin, gAxisYMax);
     draw_peak_markers(frame_bb);
+
+    if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
+    {
+        float legend_x = frame_bb.Min.x + 10.0f;
+        for (int channel = 0; channel < display_channel_count(); channel++)
+        {
+            const char *label = display_channel_title(channel);
+            ImGui::GetWindowDrawList()->AddText(ImVec2(legend_x, frame_bb.Min.y + 8.0f), display_channel_live_color(channel), label);
+            legend_x += ImGui::CalcTextSize(label).x + 20.0f;
+        }
+    }
 }
 
 void render_main_screen()
@@ -1626,17 +2130,34 @@ void render_main_screen()
 
     clear_frequency_gesture_frame();
     const float total_height = ImGui::GetContentRegionAvail().y;
+    const bool show_spectrum = spectrum_visible();
     const bool show_waterfall = waterfall_visible();
     const float plot_width = std::max(0.0f, ImGui::GetContentRegionAvail().x);
-    const float waterfall_height = show_waterfall ? std::max(180.0f, total_height * GetWaterfallFraction(gConfig)) : 0.0f;
-    const float spectrum_height = show_waterfall ? std::max(kSpectrumMinimumHeight, total_height - waterfall_height - 24.0f) : std::max(kSpectrumMinimumHeight, total_height);
+    float waterfall_height = 0.0f;
+    float spectrum_height = 0.0f;
+    if (show_spectrum && show_waterfall)
+    {
+        waterfall_height = std::max(180.0f, total_height * GetWaterfallFraction(gConfig));
+        spectrum_height = std::max(kSpectrumMinimumHeight, total_height - waterfall_height - 12.0f);
+    }
+    else if (show_spectrum)
+    {
+        spectrum_height = std::max(kSpectrumMinimumHeight, total_height);
+    }
+    else if (show_waterfall)
+    {
+        waterfall_height = total_height;
+    }
+    const int waterfallPanels = show_waterfall ? display_channel_count() : 0;
+    const float waterfallGap = 0.0f;
+    const float waterfallPanelHeight = waterfallPanels > 0 ? std::max(80.0f, (waterfall_height - waterfallGap * (waterfallPanels - 1)) / (float)waterfallPanels) : 0.0f;
 
-    ImRect spectrumFrame;
-    ImRect waterfallFrame;
+    ImRect spectrumFrame = ImRect();
+    ImRect waterfallFrames[kMaxInputChannels];
     bool spectrumHovered = false;
-    bool waterfallHovered = false;
+    bool waterfallHovered[kMaxInputChannels] = {false, false};
 
-    if (block_add("spectrum_frame", ImVec2(plot_width, spectrum_height), &spectrumFrame, &spectrumHovered))
+    if (show_spectrum && block_add("spectrum_frame", ImVec2(plot_width, spectrum_height), &spectrumFrame, &spectrumHovered))
     {
         const ImGuiStyle &style = GImGui->Style;
         ImGui::RenderFrame(spectrumFrame.Min, spectrumFrame.Max, ImGui::GetColorU32(ImGuiCol_FrameBg), true, style.FrameRounding);
@@ -1650,39 +2171,62 @@ void render_main_screen()
         }
     }
 
-    if (show_waterfall)
-        ImGui::Dummy(ImVec2(0.0f, 18.0f));
+    if (show_spectrum && show_waterfall)
+        ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
-    if (show_waterfall && block_add("waterfall_frame", ImVec2(plot_width, waterfall_height), &waterfallFrame, &waterfallHovered))
+    for (int channel = 0; channel < waterfallPanels; channel++)
     {
-        const int width = static_cast<int>(waterfallFrame.GetWidth());
-        const int height = static_cast<int>(waterfallFrame.GetHeight());
-        if (width != gWaterfallWidth || height != gWaterfallHeight || !gWaterfallInitialized)
+        char frame_id[32];
+        snprintf(frame_id, sizeof(frame_id), "waterfall_frame_%d", channel);
+        if (!block_add(frame_id, ImVec2(plot_width, waterfallPanelHeight), &waterfallFrames[channel], &waterfallHovered[channel]))
+            continue;
+
+        const int width = static_cast<int>(waterfallFrames[channel].GetWidth());
+        const int height = static_cast<int>(waterfallFrames[channel].GetHeight());
+        if (width != gWaterfallWidth[channel] || height != gWaterfallHeight[channel] || !gWaterfallInitialized[channel])
         {
             std::lock_guard<std::mutex> lock(gStateMutex);
-            gWaterfallWidth = width;
-            gWaterfallHeight = height;
-            Init_waterfall(width, height);
+            gWaterfallWidth[channel] = width;
+            gWaterfallHeight[channel] = height;
+            Init_waterfall(channel, width, height);
             rebuild_scale_if_ready_locked();
             refresh_display_state_locked(false);
-            gWaterfallInitialized = true;
+            gWaterfallInitialized[channel] = true;
         }
 
-        Draw_waterfall(waterfallFrame);
-        Draw_vertical_scale(waterfallFrame, gWaterfallSecondsPerRow);
+        Draw_waterfall(channel, waterfallFrames[channel]);
+        Draw_vertical_scale(waterfallFrames[channel], gWaterfallSecondsPerRow);
+        if (display_channel_count() >= 2 || gConfig.input_channel_mode != InputChannelMode::Mono)
+        {
+            const char *label = display_channel_title(channel);
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(waterfallFrames[channel].Min.x + 10.0f, waterfallFrames[channel].Min.y + 8.0f),
+                display_channel_live_color(channel),
+                label);
+        }
+
+        if (channel + 1 < waterfallPanels && waterfallGap > 0.0f)
+            ImGui::Dummy(ImVec2(0.0f, waterfallGap));
     }
 
-    if (spectrumFrame.GetWidth() > 0.0f && spectrumFrame.GetHeight() > 0.0f)
+    if (show_spectrum && spectrumFrame.GetWidth() > 0.0f && spectrumFrame.GetHeight() > 0.0f)
     {
         gFrequencyGestureFrame = spectrumFrame;
-        if (show_waterfall && waterfallFrame.GetWidth() > 0.0f && waterfallFrame.GetHeight() > 0.0f)
-            gFrequencyGestureFrame.Max.y = waterfallFrame.Max.y;
+        if (show_waterfall && waterfallPanels > 0 && waterfallFrames[waterfallPanels - 1].GetWidth() > 0.0f && waterfallFrames[waterfallPanels - 1].GetHeight() > 0.0f)
+            gFrequencyGestureFrame.Max.y = waterfallFrames[waterfallPanels - 1].Max.y;
+        gFrequencyGestureFrameValid = true;
+    }
+    else if (show_waterfall && waterfallPanels > 0 && waterfallFrames[0].GetWidth() > 0.0f && waterfallFrames[0].GetHeight() > 0.0f)
+    {
+        gFrequencyGestureFrame = waterfallFrames[0];
+        gFrequencyGestureFrame.Max.y = waterfallFrames[waterfallPanels - 1].Max.y;
         gFrequencyGestureFrameValid = true;
     }
 
-    update_cursor_state(spectrumFrame, spectrumHovered, waterfallFrame, waterfallHovered);
-    draw_spectrum(spectrumFrame);
-    draw_cursor(spectrumFrame, waterfallFrame);
+    update_cursor_state(spectrumFrame, spectrumHovered, waterfallFrames, waterfallHovered, waterfallPanels);
+    if (show_spectrum)
+        draw_spectrum(spectrumFrame);
+    draw_cursor(spectrumFrame, waterfallFrames, waterfallPanels);
 }
 }
 
@@ -1696,14 +2240,15 @@ void Spectrogrammer_Init(void *window)
     if (!gSessionInitialized)
     {
         start_processing_session();
-        gSessionInitialized = (gProcessor != nullptr);
+        gSessionInitialized = (gProcessors[0] != nullptr);
     }
 }
 
 void Spectrogrammer_ReleaseGraphics()
 {
     Shutdown_waterfall();
-    gWaterfallInitialized = false;
+    for (int channel = 0; channel < kMaxInputChannels; channel++)
+        gWaterfallInitialized[channel] = false;
 }
 
 void Spectrogrammer_Shutdown()
@@ -1716,8 +2261,12 @@ void Spectrogrammer_Shutdown()
         clear_peak_hold_locked();
         clear_reference_hold_locked();
         clear_peak_markers_locked();
-        gSharedState.live_power_raw.Resize(0);
-        gSharedState.live_line.Resize(0);
+        for (int channel = 0; channel < kMaxInputChannels; channel++)
+        {
+            channel_state(channel).live_power_raw.Resize(0);
+            channel_state(channel).live_line.Resize(0);
+        }
+        clear_display_channels_locked();
     }
 
     Reset_waterfall_storage();

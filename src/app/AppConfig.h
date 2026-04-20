@@ -13,6 +13,15 @@ enum class AudioSourceMode
     Unprocessed = 4,
 };
 
+enum class InputChannelMode
+{
+    Mono = 0,
+    Left = 1,
+    Right = 2,
+    StereoMixed = 3,
+    StereoIndependent = 4,
+};
+
 enum class SamplingRateMode
 {
     Auto = 0,
@@ -42,6 +51,10 @@ enum class WaterfallSizeMode
     OneThird = 0,
     OneHalf = 1,
     TwoThirds = 2,
+    OneQuarter = 3,
+    TwoFifths = 4,
+    ThreeFifths = 5,
+    ThreeQuarters = 6,
 };
 
 enum class TraceMode
@@ -61,6 +74,7 @@ struct AppConfig
 {
     int version;
     AudioSourceMode audio_source_mode;
+    InputChannelMode input_channel_mode;
     SamplingRateMode sampling_rate_mode;
     int sample_rate_hz;
     int fft_size;
@@ -70,6 +84,7 @@ struct AppConfig
     float exponential_smoothing_factor;
     FrequencyAxisScale frequency_axis_scale;
     WaterfallSizeMode waterfall_size_mode;
+    bool swap_stereo_order;
     bool max_hold_trace_enabled;
     float peak_hold_falloff_seconds;
     int peak_marker_count;
@@ -77,6 +92,7 @@ struct AppConfig
     bool stay_awake;
     TraceMode trace_mode;
     bool background_capture_enabled;
+    bool show_spectrum;
     bool show_waterfall;
 };
 

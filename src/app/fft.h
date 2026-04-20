@@ -68,7 +68,7 @@ public:
 
     int getProcessedLength() const { return m_pInput_samples.GetSize() * m_decimationFactor; }
 
-    void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length)
+    void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length, int inputStride)
     {
         float *m_in_samples = m_pInput_samples.GetData();
         for (int i = 0; i < length; i++)
@@ -81,7 +81,7 @@ public:
             if (ii >= m_pInput_samples.GetSize())
                 break;
 
-            float val = Uint16ToFloat(&input[i]);
+            float val = Uint16ToFloat(&input[i * inputStride]);
             val *= apply_window(m_windowFunction, ii, m_pInput_samples.GetSize());
             m_in_samples[ii] = val;
         }
