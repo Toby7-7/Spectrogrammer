@@ -13,7 +13,7 @@
         <service
             android:name=".CaptureForegroundService"
             android:exported="false" />
-        <activity android:configChanges="keyboardHidden|orientation" android:label="${LABEL}" android:name="android.app.NativeActivity" android:exported="true"  android:screenOrientation="portrait">
+        <activity android:configChanges="keyboardHidden|orientation" android:label="${LABEL}" android:name="android.app.NativeActivity" android:exported="true" android:screenOrientation="portrait" android:theme="@style/SpectrogrammerTheme">
             <meta-data android:name="android.app.lib_name" android:value="${APPNAME}"/>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>

@@ -26,7 +26,8 @@ static EGLDisplay           g_EglDisplay = EGL_NO_DISPLAY;
 static EGLSurface           g_EglSurface = EGL_NO_SURFACE;
 static EGLContext           g_EglContext = EGL_NO_CONTEXT;
 static struct android_app*  g_App = nullptr;
-static bool                 g_Initialized = false;
+static bool                 g_WindowInitialized = false;
+static bool                 g_ImGuiInitialized = false;
 static bool                 g_SpectrogrammerInitialized = false;
 static bool                 g_RecordAudioPermissionRequested = false;
 static bool                 g_BackgroundServiceRunning = false;
@@ -39,6 +40,7 @@ static void Start(struct android_app* app);
 static void Stop();
 static void Init(struct android_app* app);
 static void Resume(struct android_app* app);
+static void ShutdownWindow();
 static void Shutdown();
 static void MainLoopStep();
 static void AndroidDisplayKeyboard(int pShow);
@@ -71,7 +73,7 @@ static void handleAppCmd(struct android_app* app, int32_t appCmd)
         Init(app);
         break;
     case APP_CMD_TERM_WINDOW:
-        Shutdown();
+        ShutdownWindow();
         break;
     case APP_CMD_GAINED_FOCUS:
     case APP_CMD_LOST_FOCUS:
@@ -95,7 +97,7 @@ static int32_t handleInputEvent(struct android_app* app, AInputEvent* inputEvent
         return 1;
     }
 
-    if (ImGui::GetCurrentContext() == nullptr)
+    if (!g_WindowInitialized || ImGui::GetCurrentContext() == nullptr)
         return 0;
 
     if (AInputEvent_getType(inputEvent) == AINPUT_EVENT_TYPE_MOTION)
@@ -130,8 +132,8 @@ extern "C" void android_main(struct android_app* app)
         int out_events;
         struct android_poll_source* out_data;
 
-        // Poll all events. If the app is not visible, this loop blocks until g_Initialized == true.
-        while (ALooper_pollAll(g_Initialized ? 0 : -1, nullptr, &out_events, (void**)&out_data) >= 0)
+        // Poll all events. If the app is not visible, this loop blocks until a window is ready.
+        while (ALooper_pollAll(g_WindowInitialized ? 0 : -1, nullptr, &out_events, (void**)&out_data) >= 0)
         {
             // Process one event
             if (out_data != nullptr)
@@ -147,7 +149,7 @@ extern "C" void android_main(struct android_app* app)
                     g_SpectrogrammerInitialized = false;
                 }
 
-                if (g_Initialized)
+                if (g_WindowInitialized || g_ImGuiInitialized)
                     Shutdown();
 
                 return;
@@ -175,10 +177,13 @@ void Resume(struct android_app* app)
 
 void Init(struct android_app* app)
 {
-    if (g_Initialized)
+    if (g_WindowInitialized)
         return;
 
     g_App = app;
+    if (g_App == nullptr || g_App->window == nullptr)
+        return;
+
     ANativeWindow_acquire(g_App->window);
 
     keep_screen_on();
@@ -217,27 +222,26 @@ void Init(struct android_app* app)
         eglMakeCurrent(g_EglDisplay, g_EglSurface, g_EglSurface, g_EglContext);
     }
 
-    // Setup Dear ImGui context
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
+    if (!g_ImGuiInitialized)
+    {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
 
-    // Redirect loading/saving of .ini file to our location.
-    // Make sure 'g_IniFilename' persists while we use Dear ImGui.
-    g_IniFilename = std::string(app->activity->internalDataPath) + "/imgui.ini";
-    io.IniFilename = g_IniFilename.c_str();
+        // Redirect loading/saving of .ini file to our location.
+        // Make sure 'g_IniFilename' persists while we use Dear ImGui.
+        g_IniFilename = std::string(app->activity->internalDataPath) + "/imgui.ini";
+        io.IniFilename = g_IniFilename.c_str();
 
-    // Setup Dear ImGui style
-    ImGui::StyleColorsDark();
-    ConfigureImGuiStyle();
+        ImGui::StyleColorsDark();
+        ConfigureImGuiStyle();
+        LoadBestAvailableFont();
+        g_ImGuiInitialized = true;
+    }
 
-    // Setup Platform/Renderer backends
     ImGui_ImplAndroid_Init(g_App->window);
     ImGui_ImplOpenGL3_Init("#version 300 es");
-
-    LoadBestAvailableFont();
-
-    g_Initialized = true;
+    g_WindowInitialized = true;
 }
 
 void MainLoopStep()
@@ -287,7 +291,7 @@ void MainLoopStep()
     // Rendering
     ImGui::Render();
     glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
-    static ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    const ImVec4 clear_color = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
     glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -295,16 +299,15 @@ void MainLoopStep()
     eglSwapBuffers(g_EglDisplay, g_EglSurface);
 }
 
-void Shutdown()
+void ShutdownWindow()
 {
-    if (!g_Initialized)
+    if (!g_WindowInitialized)
         return;
 
     Spectrogrammer_ReleaseGraphics();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplAndroid_Shutdown();
-    ImGui::DestroyContext();
 
     if (g_EglDisplay != EGL_NO_DISPLAY)
     {
@@ -323,9 +326,20 @@ void Shutdown()
     g_EglContext = EGL_NO_CONTEXT;
     g_EglSurface = EGL_NO_SURFACE;
     ANativeWindow_release(g_App->window);
+    g_WindowInitialized = false;
+}
+
+void Shutdown()
+{
+    ShutdownWindow();
+
+    if (g_ImGuiInitialized)
+    {
+        ImGui::DestroyContext();
+        g_ImGuiInitialized = false;
+    }
 
     g_RecordAudioPermissionRequested = false;
-    g_Initialized = false;
 }
 
 // Helper functions
