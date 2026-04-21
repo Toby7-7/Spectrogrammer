@@ -56,7 +56,12 @@ enum HOLDING_STATE
 enum class SettingsPage
 {
     None = 0,
-    Settings = 1,
+    Home = 1,
+    AudioInput = 2,
+    Analysis = 3,
+    SpectrumWaterfall = 4,
+    System = 5,
+    About = 6,
 };
 
 struct PeakMarker
@@ -1480,16 +1485,190 @@ void render_setting_label(const char *title)
     ImGui::TextUnformatted(title);
 }
 
-void render_about_section()
+void clear_settings_scroll_state()
 {
-    render_section_title("关于");
-    ImGui::TextWrapped("Spectrogrammer 的中文移动版 fork，当前仓库维护在 GitHub。");
-    ImGui::TextWrapped("仓库：%s", kGitHubRepositoryUrl);
-    if (ImGui::Button("打开 GitHub 仓库", ImVec2(ImGui::GetContentRegionAvail().x, 0.0f)))
-        open_url_external(kGitHubRepositoryUrl);
-#ifndef ANDROID
-    ImGui::TextDisabled("当前平台仅显示仓库链接，不直接拉起浏览器。");
-#endif
+    gSettingsScrollTracking = false;
+    gSettingsScrollDragging = false;
+}
+
+void set_settings_page(SettingsPage page)
+{
+    gSettingsPage = page;
+    clear_settings_scroll_state();
+}
+
+const char *settings_page_title(SettingsPage page)
+{
+    switch (page)
+    {
+    case SettingsPage::AudioInput:
+        return "音频输入";
+    case SettingsPage::Analysis:
+        return "分析处理";
+    case SettingsPage::SpectrumWaterfall:
+        return "频谱与瀑布";
+    case SettingsPage::System:
+        return "系统";
+    case SettingsPage::About:
+        return "关于";
+    case SettingsPage::Home:
+    case SettingsPage::None:
+    default:
+        return "";
+    }
+}
+
+const char *settings_page_window_id(SettingsPage page)
+{
+    switch (page)
+    {
+    case SettingsPage::Home:
+        return "设置首页";
+    case SettingsPage::AudioInput:
+        return "音频输入页";
+    case SettingsPage::Analysis:
+        return "分析处理页";
+    case SettingsPage::SpectrumWaterfall:
+        return "频谱与瀑布页";
+    case SettingsPage::System:
+        return "系统页";
+    case SettingsPage::About:
+        return "关于页";
+    case SettingsPage::None:
+    default:
+        return "设置";
+    }
+}
+
+SettingsPage settings_back_target(SettingsPage page)
+{
+    if (page == SettingsPage::Home)
+        return SettingsPage::None;
+    return SettingsPage::Home;
+}
+
+const char *settings_back_label(SettingsPage page)
+{
+    return page == SettingsPage::Home ? "返回主界面" : "返回设置";
+}
+
+const char *enabled_state_label(bool enabled)
+{
+    return enabled ? "开" : "关";
+}
+
+bool touch_invisible_button(const char *id, const ImVec2 &size, ImGuiButtonFlags flags = 0)
+{
+    ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+    const bool pressed = ImGui::InvisibleButton(id, size, flags);
+    ImGui::PopItemFlag();
+    if (pressed)
+        ImGui::ClearActiveID();
+    return pressed;
+}
+
+bool touch_button(const char *label, const ImVec2 &size = ImVec2(0.0f, 0.0f))
+{
+    ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+    const bool pressed = ImGui::Button(label, size);
+    ImGui::PopItemFlag();
+    if (pressed)
+        ImGui::ClearActiveID();
+    return pressed;
+}
+
+bool render_settings_header_button(const char *id, const char *label)
+{
+    const ImVec2 text_size = ImGui::CalcTextSize(label);
+    const float width = std::max(text_size.x + 58.0f, std::min(ImGui::GetContentRegionAvail().x * 0.44f, 340.0f));
+    const float height = std::max(78.0f, large_button_height() * 0.88f);
+    const ImVec2 size(width, height);
+    const ImVec2 top_left = ImGui::GetCursorScreenPos();
+    const ImVec2 bottom_right(top_left.x + size.x, top_left.y + size.y);
+
+    const bool pressed = touch_invisible_button(id, size);
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+
+    ImDrawList *draw_list = ImGui::GetWindowDrawList();
+    const ImU32 fill_color = ImGui::GetColorU32(
+        active ? ImVec4(0.17f, 0.32f, 0.58f, 0.98f) :
+        hovered ? ImVec4(0.14f, 0.28f, 0.52f, 0.96f) :
+                  ImVec4(0.11f, 0.24f, 0.46f, 0.94f));
+    const ImU32 border_color = ImGui::GetColorU32(ImVec4(0.30f, 0.56f, 0.94f, hovered ? 0.95f : 0.78f));
+    const ImU32 text_color = ImGui::GetColorU32(ImVec4(0.98f, 0.99f, 1.0f, 1.0f));
+    const float rounding = 18.0f;
+
+    draw_list->AddRectFilled(top_left, bottom_right, fill_color, rounding);
+    draw_list->AddRect(top_left, bottom_right, border_color, rounding, 0, 2.0f);
+
+    draw_list->AddText(
+        ImVec2(top_left.x + (size.x - text_size.x) * 0.5f, top_left.y + (size.y - text_size.y) * 0.5f),
+        text_color,
+        label);
+    return pressed;
+}
+
+const char *display_visibility_summary_label()
+{
+    if (gConfig.show_spectrum && gConfig.show_waterfall)
+        return "频谱+瀑布";
+    if (gConfig.show_spectrum)
+        return "仅频谱";
+    return "仅瀑布";
+}
+
+void format_settings_page_summary(SettingsPage page, char *buffer, size_t buffer_size)
+{
+    if (buffer == nullptr || buffer_size == 0)
+        return;
+
+    switch (page)
+    {
+    case SettingsPage::AudioInput:
+        snprintf(
+            buffer,
+            buffer_size,
+            "%s / %s / %s",
+            audio_source_label(gConfig.audio_source_mode),
+            input_channel_label(gConfig.input_channel_mode),
+            sampling_rate_label(gConfig.sampling_rate_mode, configured_sample_rate()));
+        break;
+    case SettingsPage::Analysis:
+        snprintf(
+            buffer,
+            buffer_size,
+            "FFT %d / 抽取 %d / 平滑 %.2f",
+            gConfig.fft_size,
+            gConfig.decimations,
+            gConfig.exponential_smoothing_factor);
+        break;
+    case SettingsPage::SpectrumWaterfall:
+        snprintf(
+            buffer,
+            buffer_size,
+            "%s / %s / 峰值保持 %s",
+            frequency_axis_label(gConfig.frequency_axis_scale),
+            display_visibility_summary_label(),
+            enabled_state_label(gConfig.max_hold_trace_enabled));
+        break;
+    case SettingsPage::System:
+        snprintf(
+            buffer,
+            buffer_size,
+            "后台采集 %s / 保持亮屏 %s",
+            enabled_state_label(gConfig.background_capture_enabled),
+            enabled_state_label(gConfig.stay_awake));
+        break;
+    case SettingsPage::About:
+        snprintf(buffer, buffer_size, "仓库链接、来源说明与开源信息");
+        break;
+    case SettingsPage::Home:
+    case SettingsPage::None:
+    default:
+        buffer[0] = '\0';
+        break;
+    }
 }
 
 void update_settings_drag_scroll()
@@ -1530,20 +1709,15 @@ void update_settings_drag_scroll()
         ImGui::SetScrollY(next_scroll);
 }
 
-void render_page_header(const char *title)
+void render_page_header(SettingsPage page)
 {
     ImGui::Dummy(ImVec2(0.0f, top_safe_padding()));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(20.0f, 16.0f));
-    if (ImGui::Button("返回主界面", ImVec2(std::min(ImGui::GetContentRegionAvail().x * 0.45f, 320.0f), large_button_height())))
-        gSettingsPage = SettingsPage::None;
-    ImGui::PopStyleVar();
+    if (render_settings_header_button("##settings_back", settings_back_label(page)))
+        set_settings_page(settings_back_target(page));
     ImGui::Spacing();
-    ImGui::Text("%s", title);
-    ImGui::Spacing();
-    ImGui::Separator();
 }
 
-void begin_settings_page_layout(const char *title)
+void begin_settings_page_layout(SettingsPage page)
 {
     const float side_margin = settings_side_margin();
     ImGui::SetCursorPosX(side_margin);
@@ -1552,13 +1726,13 @@ void begin_settings_page_layout(const char *title)
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(24.0f, 18.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(18.0f, 20.0f));
     ImGui::BeginChild(
-        title,
+        settings_page_window_id(page),
         ImVec2(
             std::max(0.0f, avail.x - side_margin),
             std::max(0.0f, avail.y)),
         false,
         ImGuiWindowFlags_NoScrollbar);
-    render_page_header(title);
+    render_page_header(page);
 }
 
 void end_settings_page_layout()
@@ -1567,11 +1741,57 @@ void end_settings_page_layout()
     ImGui::PopStyleVar(3);
 }
 
-void render_settings_page()
+bool render_settings_navigation_card(const char *id, const char *title, const char *summary)
 {
-    begin_settings_page_layout("设置");
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float height = std::max(164.0f, large_button_height() * 1.52f);
+    const ImVec2 size(width, height);
+    const ImVec2 top_left = ImGui::GetCursorScreenPos();
 
-    render_section_title("音频");
+    const bool pressed = touch_invisible_button(id, size);
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+
+    ImDrawList *draw_list = ImGui::GetWindowDrawList();
+    const ImU32 fill_color = ImGui::GetColorU32(
+        active ? ImVec4(0.26f, 0.29f, 0.34f, 0.96f) :
+        hovered ? ImVec4(0.19f, 0.21f, 0.25f, 0.94f) :
+                  ImVec4(0.14f, 0.16f, 0.20f, 0.90f));
+    const ImU32 border_color = ImGui::GetColorU32(hovered ? ImVec4(0.93f, 0.78f, 0.18f, 0.75f) : ImVec4(0.36f, 0.39f, 0.45f, 0.60f));
+    const ImU32 title_color = ImGui::GetColorU32(ImVec4(0.96f, 0.96f, 0.97f, 1.0f));
+    const ImU32 summary_color = ImGui::GetColorU32(ImVec4(0.76f, 0.78f, 0.82f, 0.92f));
+    const ImU32 chevron_color = ImGui::GetColorU32(ImVec4(0.93f, 0.78f, 0.18f, hovered ? 1.0f : 0.78f));
+    const float rounding = 18.0f;
+    const ImVec2 bottom_right(top_left.x + size.x, top_left.y + size.y);
+
+    draw_list->AddRectFilled(top_left, bottom_right, fill_color, rounding);
+    draw_list->AddRect(top_left, bottom_right, border_color, rounding, 0, 2.0f);
+
+    const float font_size = ImGui::GetFontSize();
+    const ImVec2 text_pos(top_left.x + 28.0f, top_left.y + 24.0f);
+    draw_list->AddText(ImGui::GetFont(), font_size, text_pos, title_color, title);
+    const ImVec2 summary_pos(top_left.x + 28.0f, top_left.y + 24.0f + font_size + 16.0f);
+    draw_list->AddText(
+        ImGui::GetFont(),
+        font_size,
+        summary_pos,
+        summary_color,
+        summary,
+        nullptr,
+        std::max(120.0f, size.x - 98.0f));
+
+    const char chevron[] = ">";
+    const ImVec2 chevron_size = ImGui::CalcTextSize(chevron);
+    draw_list->AddText(
+        ImVec2(top_left.x + size.x - chevron_size.x - 24.0f, top_left.y + (size.y - chevron_size.y) * 0.5f),
+        chevron_color,
+        chevron);
+
+    return pressed;
+}
+
+void render_audio_input_settings()
+{
     render_setting_label("音频源");
     set_full_width_item();
     if (ImGui::BeginCombo("##audio_source", audio_source_label(gConfig.audio_source_mode)))
@@ -1681,8 +1901,10 @@ void render_settings_page()
         ImGui::EndCombo();
     }
     ImGui::TextDisabled("高采样率取决于设备和驱动支持，不支持时可能无法启动该档位。");
+}
 
-    render_section_title("处理");
+void render_analysis_settings()
+{
     render_setting_label("FFT 大小");
     set_full_width_item();
     if (ImGui::BeginCombo("##fft_size", fft_size_label(gConfig)))
@@ -1761,25 +1983,10 @@ void render_settings_page()
         gConfig.exponential_smoothing_factor = smoothing;
         mark_config_dirty();
     }
+}
 
-    float overlay_scale = gConfig.overlay_text_scale;
-    render_setting_label("图上标注字号");
-    set_full_width_item();
-    if (ImGui::SliderFloat("##overlay_text_scale", &overlay_scale, 0.7f, 1.8f, "%.2f 倍"))
-    {
-        gConfig.overlay_text_scale = overlay_scale;
-        mark_config_dirty();
-    }
-
-    float overlay_alpha = gConfig.overlay_text_alpha;
-    render_setting_label("图上标注透明度");
-    set_full_width_item();
-    if (ImGui::SliderFloat("##overlay_text_alpha", &overlay_alpha, 0.25f, 1.0f, "%.2f"))
-    {
-        gConfig.overlay_text_alpha = overlay_alpha;
-        mark_config_dirty();
-    }
-
+void render_spectrum_waterfall_settings()
+{
     render_section_title("频谱");
     render_setting_label("频率轴刻度");
     set_full_width_item();
@@ -1808,6 +2015,25 @@ void render_settings_page()
         ImGui::EndCombo();
     }
 
+    float overlay_scale = gConfig.overlay_text_scale;
+    render_setting_label("图上标注字号");
+    set_full_width_item();
+    if (ImGui::SliderFloat("##overlay_text_scale", &overlay_scale, 0.7f, 1.8f, "%.2f 倍"))
+    {
+        gConfig.overlay_text_scale = overlay_scale;
+        mark_config_dirty();
+    }
+
+    float overlay_alpha = gConfig.overlay_text_alpha;
+    render_setting_label("图上标注透明度");
+    set_full_width_item();
+    if (ImGui::SliderFloat("##overlay_text_alpha", &overlay_alpha, 0.25f, 1.0f, "%.2f"))
+    {
+        gConfig.overlay_text_alpha = overlay_alpha;
+        mark_config_dirty();
+    }
+
+    render_section_title("峰值");
     bool max_hold = gConfig.max_hold_trace_enabled;
     if (ImGui::Checkbox("显示峰值保持曲线", &max_hold))
     {
@@ -1937,8 +2163,10 @@ void render_settings_page()
         restart_processing_session();
     }
     ImGui::TextDisabled("当前约 %.0f ms/行", gConfig.desired_transform_interval_ms);
+}
 
-    render_section_title("运行");
+void render_system_settings()
+{
     bool background_capture = gConfig.background_capture_enabled;
     if (ImGui::Checkbox("后台采集", &background_capture))
     {
@@ -1952,8 +2180,74 @@ void render_settings_page()
         gConfig.stay_awake = stay_awake;
         mark_config_dirty();
     }
+}
 
-    render_about_section();
+void render_about_page()
+{
+    ImGui::TextWrapped("Spectrogrammer 的中文移动版 fork，当前仓库维护在 GitHub。");
+    ImGui::TextWrapped("仓库：%s", kGitHubRepositoryUrl);
+    if (touch_button("打开 GitHub 仓库", ImVec2(ImGui::GetContentRegionAvail().x, 0.0f)))
+        open_url_external(kGitHubRepositoryUrl);
+#ifndef ANDROID
+    ImGui::TextDisabled("当前平台仅显示仓库链接，不直接拉起浏览器。");
+#endif
+}
+
+void render_settings_home_page()
+{
+    const SettingsPage pages[] = {
+        SettingsPage::AudioInput,
+        SettingsPage::Analysis,
+        SettingsPage::SpectrumWaterfall,
+        SettingsPage::System,
+        SettingsPage::About,
+    };
+
+    for (SettingsPage page : pages)
+    {
+        char summary[160];
+        format_settings_page_summary(page, summary, sizeof(summary));
+        if (render_settings_navigation_card(settings_page_window_id(page), settings_page_title(page), summary))
+        {
+            set_settings_page(page);
+            return;
+        }
+        ImGui::Spacing();
+    }
+}
+
+void render_settings_page()
+{
+    if (gSettingsPage == SettingsPage::None)
+        return;
+
+    begin_settings_page_layout(gSettingsPage);
+
+    switch (gSettingsPage)
+    {
+    case SettingsPage::Home:
+        render_settings_home_page();
+        break;
+    case SettingsPage::AudioInput:
+        render_audio_input_settings();
+        break;
+    case SettingsPage::Analysis:
+        render_analysis_settings();
+        break;
+    case SettingsPage::SpectrumWaterfall:
+        render_spectrum_waterfall_settings();
+        break;
+    case SettingsPage::System:
+        render_system_settings();
+        break;
+    case SettingsPage::About:
+        render_about_page();
+        break;
+    case SettingsPage::None:
+    default:
+        break;
+    }
+
     update_settings_drag_scroll();
     end_settings_page_layout();
 }
@@ -1969,11 +2263,11 @@ void draw_toolbar()
     const float width = ImGui::GetContentRegionAvail().x;
     const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * 3.0f) / 4.0f;
 
-    if (ImGui::Button(gDisplayPaused ? "继续" : "暂停", ImVec2(button_width, row_height)))
+    if (touch_button(gDisplayPaused ? "继续" : "暂停", ImVec2(button_width, row_height)))
         gDisplayPaused = !gDisplayPaused;
 
     ImGui::SameLine();
-    if (ImGui::Button("清除峰值", ImVec2(button_width, row_height)))
+    if (touch_button("清除峰值", ImVec2(button_width, row_height)))
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
         clear_peak_hold_locked();
@@ -1982,7 +2276,7 @@ void draw_toolbar()
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!gCursorActive);
-    if (ImGui::Button("清除游标", ImVec2(button_width, row_height)))
+    if (touch_button("清除游标", ImVec2(button_width, row_height)))
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
         gCursorActive = false;
@@ -1991,8 +2285,8 @@ void draw_toolbar()
     ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (ImGui::Button("设置", ImVec2(button_width, row_height)))
-        gSettingsPage = SettingsPage::Settings;
+    if (touch_button("设置", ImVec2(button_width, row_height)))
+        set_settings_page(SettingsPage::Home);
     ImGui::PopStyleVar(3);
 
     float axis_min = 0.0f;
@@ -2060,11 +2354,11 @@ void draw_hold_popup()
         restart_processing_session();
     }
 
-    if (ImGui::Button("记录当前曲线"))
+    if (touch_button("记录当前曲线"))
         copy_current_to_reference();
 
     ImGui::SameLine();
-    if (ImGui::Button("清除基线"))
+    if (touch_button("清除基线"))
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
         clear_reference_hold_locked();
@@ -2072,7 +2366,7 @@ void draw_hold_popup()
     }
 
     ImGui::Separator();
-    if (ImGui::Button("关闭"))
+    if (touch_button("关闭"))
         ImGui::CloseCurrentPopup();
 
     ImGui::EndPopup();
@@ -2467,7 +2761,7 @@ bool Spectrogrammer_MainLoopStep()
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 20.0f));
     ImGui::Begin("主窗口", nullptr, window_flags);
 
-    if (gSettingsPage == SettingsPage::Settings)
+    if (gSettingsPage != SettingsPage::None)
         render_settings_page();
     else
         render_main_screen();
@@ -2482,9 +2776,7 @@ bool Spectrogrammer_HandleBackPressed()
 {
     if (gSettingsPage != SettingsPage::None)
     {
-        gSettingsPage = SettingsPage::None;
-        gSettingsScrollTracking = false;
-        gSettingsScrollDragging = false;
+        set_settings_page(settings_back_target(gSettingsPage));
         return true;
     }
 
