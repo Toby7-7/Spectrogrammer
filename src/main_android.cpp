@@ -31,6 +31,7 @@ static bool                 g_ImGuiInitialized = false;
 static bool                 g_SpectrogrammerInitialized = false;
 static bool                 g_RecordAudioPermissionRequested = false;
 static bool                 g_BackgroundServiceRunning = false;
+static bool                 g_BackgroundServiceUseChinese = false;
 static char                 g_LogTag[] = "ImGuiExample";
 static std::string          g_IniFilename = "";
 static ImVector<ImWchar>    g_FontGlyphRanges;
@@ -55,6 +56,7 @@ static void LoadBestAvailableFont();
 static void StartCaptureForegroundService();
 static void StopCaptureForegroundService();
 static void MoveTaskToBack();
+static const char* UiText(const char* english, const char* chinese);
 
 // Main code
 static void handleAppCmd(struct android_app* app, int32_t appCmd)
@@ -479,18 +481,23 @@ static void DrawPermissionPrompt()
                              ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoResize;
 
-    ImGui::Begin("麦克风权限", nullptr, flags);
+    ImGui::Begin("permission_prompt", nullptr, flags);
     ImGui::SetCursorPosY(viewport->WorkSize.y * 0.25f);
-    ImGui::TextWrapped("频谱仪需要麦克风权限后才能启动频谱分析。");
+    ImGui::TextWrapped("%s", UiText("Microphone permission is required before spectrum analysis can start.", "频谱仪需要麦克风权限后才能启动频谱分析。"));
     ImGui::Spacing();
-    ImGui::TextWrapped("请在系统弹窗中授予录音权限，然后点击“重试”。");
+    ImGui::TextWrapped("%s", UiText("Grant recording permission in the system dialog, then tap Retry.", "请在系统弹窗中授予录音权限，然后点击“重试”。"));
     ImGui::Spacing();
-    if (ImGui::Button("重试", ImVec2(-1.0f, 0.0f)))
+    if (ImGui::Button(UiText("Retry", "重试"), ImVec2(-1.0f, 0.0f)))
     {
         g_RecordAudioPermissionRequested = false;
         RequestRecordAudioPermission();
     }
     ImGui::End();
+}
+
+static const char* UiText(const char* english, const char* chinese)
+{
+    return Spectrogrammer_UseChineseUi() ? chinese : english;
 }
 
 static float CalculateUiScale()
@@ -571,13 +578,26 @@ static const ImWchar* BuildUiGlyphRanges()
         "音频",
         "显示",
         "语言",
-        "中文",
-        "英文",
+        "简体中文",
         "默认",
         "通用",
         "语音识别",
         "摄像机",
         "未处理",
+        "音频输入",
+        "分析处理",
+        "频谱与瀑布",
+        "系统",
+        "关于",
+        "音频源",
+        "声道模式",
+        "左声道",
+        "右声道",
+        "双声道混合",
+        "双声道相减",
+        "双声道独立",
+        "交换左右顺序",
+        "输入增益",
         "采样率",
         "自动",
         "处理",
@@ -612,6 +632,7 @@ static const ImWchar* BuildUiGlyphRanges()
         "峰值回落时长",
         "峰值标记",
         "保持亮屏",
+        "打开 GitHub 仓库",
         "频谱",
         "当前",
         "上限",
@@ -675,15 +696,20 @@ static jobject BuildForegroundServiceIntent(JNIEnv *env, jobject nativeActivity)
     jmethodID setClassNameMethod = env->GetMethodID(
         intentClass, "setClassName",
         "(Landroid/content/Context;Ljava/lang/String;)Landroid/content/Intent;");
+    jmethodID putExtraMethod = env->GetMethodID(intentClass, "putExtra", "(Ljava/lang/String;Z)Landroid/content/Intent;");
     jstring className = env->NewStringUTF("org.nanoorg.Spectrogrammer.CaptureForegroundService");
     env->CallObjectMethod(intent, setClassNameMethod, nativeActivity, className);
+    jstring languageExtraKey = env->NewStringUTF("use_chinese_ui");
+    env->CallObjectMethod(intent, putExtraMethod, languageExtraKey, Spectrogrammer_UseChineseUi() ? JNI_TRUE : JNI_FALSE);
+    env->DeleteLocalRef(languageExtraKey);
     env->DeleteLocalRef(className);
     return intent;
 }
 
 static void StartCaptureForegroundService()
 {
-    if (g_BackgroundServiceRunning || g_App == nullptr || g_App->activity == nullptr)
+    const bool use_chinese_ui = Spectrogrammer_UseChineseUi();
+    if ((g_BackgroundServiceRunning && g_BackgroundServiceUseChinese == use_chinese_ui) || g_App == nullptr || g_App->activity == nullptr)
         return;
 
     if (!Spectrogrammer_ShouldRunInBackground())
@@ -701,6 +727,7 @@ static void StartCaptureForegroundService()
     env->DeleteLocalRef(intent);
 
     g_BackgroundServiceRunning = true;
+    g_BackgroundServiceUseChinese = use_chinese_ui;
 
     JAVA_CALL_DETACH
 }
@@ -721,6 +748,7 @@ static void StopCaptureForegroundService()
     env->DeleteLocalRef(intent);
 
     g_BackgroundServiceRunning = false;
+    g_BackgroundServiceUseChinese = false;
 
     JAVA_CALL_DETACH
 }

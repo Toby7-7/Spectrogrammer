@@ -10,7 +10,7 @@
 
 namespace
 {
-constexpr int kConfigVersion = 10;
+constexpr int kConfigVersion = 11;
 
 void migrate_config(AppConfig *config)
 {
@@ -87,6 +87,12 @@ void migrate_config(AppConfig *config)
     if (config->version < 10)
     {
         config->input_gain_db = 0.0f;
+        config->version = 10;
+    }
+
+    if (config->version < 11)
+    {
+        config->ui_language = UiLanguage::English;
         config->version = kConfigVersion;
     }
 }
@@ -123,6 +129,7 @@ AppConfig MakeDefaultAppConfig()
 {
     AppConfig config = {};
     config.version = kConfigVersion;
+    config.ui_language = UiLanguage::English;
     config.audio_source_mode = AudioSourceMode::Default;
     config.input_channel_mode = InputChannelMode::StereoIndependent;
     config.sampling_rate_mode = SamplingRateMode::Auto;
@@ -170,6 +177,8 @@ bool LoadAppConfig(const char *path, AppConfig *config)
 
         if (strcmp(key, "version") == 0)
             loaded.version = atoi(value);
+        else if (strcmp(key, "ui_language") == 0)
+            loaded.ui_language = static_cast<UiLanguage>(atoi(value));
         else if (strcmp(key, "audio_source_mode") == 0)
             loaded.audio_source_mode = static_cast<AudioSourceMode>(atoi(value));
         else if (strcmp(key, "input_channel_mode") == 0)
@@ -227,6 +236,9 @@ bool LoadAppConfig(const char *path, AppConfig *config)
 
     migrate_config(&loaded);
 
+    if ((int)loaded.ui_language < (int)UiLanguage::English ||
+        (int)loaded.ui_language > (int)UiLanguage::ChineseSimplified)
+        loaded.ui_language = UiLanguage::English;
     if (loaded.sample_rate_hz <= 0)
         loaded.sample_rate_hz = 48000;
     if ((int)loaded.input_channel_mode < (int)InputChannelMode::Mono ||
@@ -290,6 +302,7 @@ bool SaveAppConfig(const char *path, const AppConfig &config)
         return false;
 
     fprintf(file, "version=%d\n", kConfigVersion);
+    fprintf(file, "ui_language=%d\n", static_cast<int>(config.ui_language));
     fprintf(file, "audio_source_mode=%d\n", static_cast<int>(config.audio_source_mode));
     fprintf(file, "input_channel_mode=%d\n", static_cast<int>(config.input_channel_mode));
     fprintf(file, "sampling_rate_mode=%d\n", static_cast<int>(config.sampling_rate_mode));

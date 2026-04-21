@@ -13,6 +13,12 @@ enum class AudioSourceMode
     Unprocessed = 4,
 };
 
+enum class UiLanguage
+{
+    English = 0,
+    ChineseSimplified = 1,
+};
+
 enum class InputChannelMode
 {
     Mono = 0,
@@ -74,6 +80,7 @@ enum class PeakMarkerSourceMode
 struct AppConfig
 {
     int version;
+    UiLanguage ui_language;
     AudioSourceMode audio_source_mode;
     InputChannelMode input_channel_mode;
     SamplingRateMode sampling_rate_mode;

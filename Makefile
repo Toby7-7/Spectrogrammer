@@ -287,10 +287,7 @@ $(ANDROID_DEX_FILE) : $(JAVA_SOURCES) | doctor-android
 	$(D8) --lib $(ANDROID_JAR) --output $(ANDROID_DEX_DIR) $(JAVA_JAR_FILE)
 endif
 
-#We're really cutting corners.  You should probably use resource files.. Replace android:label="@string/app_name" and add a resource file.
-#Then do this -S Sources/res on the aapt line.
-#For icon support, add -S makecapk/res to the aapt line.  also,  android:icon="@mipmap/icon" to your application line in the manifest.
-#If you want to strip out about 800 bytes of data you can remove the icon and strings.
+#App name and other localized labels now come from Android string resources under src/res.
 
 #Notes for the past:  These lines used to work, but don't seem to anymore.  Switched to newer jarsigner.
 #(zipalign -c -v 8 makecapk.apk)||true #This seems to not work well.
@@ -329,8 +326,7 @@ $(SRC_DIR)/AndroidManifest.xml : doctor-android
 	PACKAGENAME=$(PACKAGENAME) \
 		ANDROIDVERSION=$(ANDROIDVERSION) \
 		ANDROIDTARGET=$(ANDROIDTARGET) \
-		APPNAME=$(APPNAME) \
-		LABEL=$(LABEL) envsubst '$$ANDROIDTARGET $$ANDROIDVERSION $$APPNAME $$PACKAGENAME $$LABEL' \
+		APPNAME=$(APPNAME) envsubst '$$ANDROIDTARGET $$ANDROIDVERSION $$APPNAME $$PACKAGENAME' \
 		< $(SRC_DIR)/AndroidManifest.xml.template > $(SRC_DIR)/AndroidManifest.xml
 
 uninstall : check-adb

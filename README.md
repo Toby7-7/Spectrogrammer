@@ -1,77 +1,88 @@
-# 频谱仪 / Spectrogrammer
+# Spectrogrammer
 
-一个面向 Android 手机的实时音频频谱分析器。由于 Spectroid 软件不开源且不足以满足部分需求，因此基于上游 `Spectrogrammer` 的 fork 继续演进，重点围绕中文界面、后台持续分析、手机触控交互、双声道显示与频谱/瀑布图查看做了较大重构。
+Real-time audio spectrum analyzer for Android phones, with a Linux build path still available for local development. This fork continues from upstream `Spectrogrammer` and focuses on mobile usability, stereo visualization, waterfall inspection, background capture, and touch-first controls.
 
-## 主要特性
-- 实时频谱曲线与瀑布图，可单独显示上方频谱图、下方瀑布图，或两者同时显示
-- 频率轴支持 `线性`、`普通对数`、`音乐对数`、`Mel`、`Bark`、`ERB`
-- 声道模式支持 `单声道`、`左声道`、`右声道`、`双声道混合`、`双声道相减`、`双声道独立`
-- 双声道独立模式支持 `交换左右顺序`，默认显示为 `左 | 右`
-- 输入增益可调，范围 `-24 dB` 到 `+24 dB`
-- 峰值保持曲线支持自动回落或不回落，峰值标记可切换 `实时峰值` / `短时峰值`
-- 手动游标线支持点击或拖动定位，并可一键 `清除游标`
-- 双指缩放和平移频率视图，便于观察局部频段
-- 图上标注字号与透明度可调，适配不同屏幕和观感
-- 中文化分类设置首页 + 子页，适合手机竖屏触控
-- Android 后台采集、保持亮屏、返回键回主界面、前台服务保活等行为适配
-- 主体逻辑以 C/C++ 实现，Android 额外带一个前台服务 Java 类
+Chinese documentation:
+- [README.zh-CN.md](README.zh-CN.md)
+- [docs/android-build-install.zh-CN.md](docs/android-build-install.zh-CN.md)
+- [docs/fork-differences.zh-CN.md](docs/fork-differences.zh-CN.md)
 
-## 快速上手
-1. 安装 APK 并授予录音权限。
-2. 主界面顶部四个按钮分别是 `暂停/继续`、`清除峰值`、`清除游标`、`设置`。
-3. 在主图或瀑布图上单指点击或拖动，可移动手动游标并查看当前位置的频率与 dB。
-4. 双指左右缩放或平移，可聚焦某个频段。
-5. 进入 `设置` 后，先看到分类首页；可进入各个子页调整参数，并可用页面顶部返回按钮或 Android 返回键逐级返回。
+## Features
+- Real-time spectrum trace and waterfall, with independent toggles for the upper spectrum and lower waterfall areas
+- Frequency-axis scales: `Linear`, `Logarithmic`, `Music log`, `Mel`, `Bark`, `ERB`
+- Channel modes: `Mono`, `Left channel`, `Right channel`, `Stereo mix`, `Stereo difference`, `Stereo split`
+- English UI by default, with an in-app switch to Simplified Chinese under `System > Language`
+- Adjustable input gain from `-24 dB` to `+24 dB`
+- Peak-hold trace with configurable falloff or no falloff
+- Peak markers selectable from `Live` or `Short hold`
+- Manual cursor line with frequency and dB readout, movable by tap or drag
+- Pinch zoom and horizontal pan for close inspection of specific frequency ranges
+- Adjustable overlay text size and opacity
+- Background capture, keep-screen-on support, Android back handling, and foreground-service persistence
 
-## 设置速览
-设置页现为 `分类首页 + 子页` 结构，首页提供 `音频输入`、`分析处理`、`频谱与瀑布`、`系统`、`关于` 五个入口。
+## Quick Start
+1. Install the APK and grant microphone permission.
+2. The four top buttons are `Pause/Resume`, `Clear Peaks`, `Clear Cursor`, and `Settings`.
+3. Tap or drag on the spectrum or waterfall to move the manual cursor and inspect the current frequency and dB level.
+4. Use a two-finger gesture to zoom or pan horizontally.
+5. Open `Settings` to access the categorized pages: `Audio Input`, `Analysis`, `Spectrum & Waterfall`, `System`, and `About`.
 
-### 音频与处理
-- `音频源`：切换 Android 录音 preset，如默认、通用、语音识别、摄像机、未处理。
-- `声道模式`：切换 `单声道`、`左声道`、`右声道`、`双声道混合`、`双声道相减`、`双声道独立`。
-- `交换左右顺序`：仅在双声道独立时出现，用于对调两个独立面板的显示顺序。
-- `输入增益`：对当前分析显示链做增益调节，范围 `-24 dB` 到 `+24 dB`。
-- `采样率`：自动或固定采样率。实际可用档位取决于设备和驱动。
-- `FFT 大小`：频率分辨率和刷新负担的平衡，当前范围为 `128` 到 `8192`。
-- `抽取级数`：先降采样再做频谱，分辨率更细，但最高可显示频率会下降。
-- `窗函数`：控制频谱泄漏与主瓣宽度。
-- `指数平滑因子`：曲线平滑程度，数值越大越平滑。
+## Settings Overview
 
-### 频谱与瀑布图
-- `图上标注字号`：调整峰值文字、游标读数、双声道标签等覆盖文字大小。
-- `图上标注透明度`：调整这些覆盖文字的整体透明度。
-- `频率轴刻度`：切换 `线性`、`普通对数`、`音乐对数`、`Mel`、`Bark`、`ERB`。
-- `显示上方频谱图`：关闭后可只保留瀑布图。
-- `显示瀑布图`：关闭后只保留上方频谱图。
-- `瀑布图高度`：设置瀑布图占屏比例。
-- `滚动速度`：瀑布图滚动速度，范围 `2 ms` 到 `250 ms`，界面从慢到快调节。
+### Audio Input
+- `Audio source`: Android recording preset such as `Default`, `Generic`, `Voice recognition`, `Camcorder`, or `Unprocessed`
+- `Channel mode`: Select `Mono`, `Left channel`, `Right channel`, `Stereo mix`, `Stereo difference`, or `Stereo split`
+- `Swap left/right order`: Only shown in stereo split mode; swaps the two display panels
+- `Input gain`: Display-path gain adjustment from `-24 dB` to `+24 dB`
+- `Sample rate`: Automatic or fixed sample rate; actual availability depends on device and driver support
 
-### 峰值与运行
-- `显示峰值保持曲线`：显示或隐藏峰值保持曲线。
-- `峰值回落时长`：峰值保持回落速度，`0` 表示不回落，最大 `120 s`。
-- `峰值标记`：显示 `0 / 1 / 3 / 5` 个峰值点。
-- `峰值标记来源`：从实时曲线或短时峰值曲线中找峰值。
-- `后台采集`：切到后台时继续录音与处理。
-- `保持亮屏`：运行时阻止屏幕自动熄灭。
-- `关于`：独立子页，提供 GitHub 仓库链接和来源说明。
+### Analysis
+- `FFT size`: Balance between frequency resolution and update cost, from `128` to `8192`
+- `Decimation stages`: Downsample before FFT for finer low-frequency resolution while reducing the visible upper frequency limit
+- `Window function`: `Rectangular`, `Hann`, `Hamming`, or `Blackman-Harris`
+- `Exponential smoothing`: Larger values produce a steadier trace
 
-## 默认配置
-- 音频源：`默认`
-- 声道模式：`双声道独立`
-- 输入增益：`0 dB`
-- 采样率：`自动（48 kHz）`
-- FFT 大小：`4096`
-- 平滑因子：`0.10`
-- 峰值标记来源：`短时峰值`
-- 峰值保持曲线：开启，默认 `4 秒` 回落
-- 后台采集：开启
+### Spectrum & Waterfall
+- `Frequency axis scale`: Switch among `Linear`, `Logarithmic`, `Music log`, `Mel`, `Bark`, and `ERB`
+- `Overlay text size`: Adjust peak labels, cursor readout, and split-channel legends
+- `Overlay text opacity`: Control overlay readability versus plot visibility
+- `Show peak-hold trace`: Toggle the held peak trace
+- `Peak falloff time`: Peak-hold decay time, where `0` means no falloff and the maximum is `120 s`
+- `Peak markers`: Show `0 / 1 / 3 / 5` markers
+- `Peak marker source`: Choose `Live` or `Short hold`
+- `Show upper spectrum`: Disable to show only the waterfall
+- `Show waterfall`: Disable to show only the upper spectrum
+- `Waterfall height`: Set how much of the screen the waterfall occupies
+- `Scroll speed`: Waterfall row interval, adjustable from `2 ms` to `250 ms`
 
-## 截图
-<img src="fastlane/metadata/android/en-US/phoneScreenshots/IMG_20260420_133439.jpg" alt="频谱仪 Android 实机截图" width="240"/>
+### System
+- `Language`: `English` or `简体中文`
+- `Background capture`: Continue recording and processing while the app is in the background
+- `Keep screen on`: Prevent the display from sleeping during use
 
-## 构建
+### About
+- Repository link and high-level provenance / open-source information
+
+## Default Configuration
+- Language: `English`
+- Audio source: `Default`
+- Channel mode: `Stereo split`
+- Input gain: `0 dB`
+- Sample rate: `Auto (48 kHz)`
+- FFT size: `4096`
+- Exponential smoothing: `0.10`
+- Peak marker source: `Short hold`
+- Peak-hold trace: enabled with a default `4 s` falloff
+- Background capture: enabled
+
+## Screenshot
+<img src="fastlane/metadata/android/en-US/phoneScreenshots/Screenshot_main.jpg" alt="Spectrogrammer main screen on Android" width="240"/>
+<img src="fastlane/metadata/android/en-US/phoneScreenshots/Screenshot_settings.jpg" alt="Spectrogrammer settings screen on Android" width="240"/>
+
+## Build
+
 ### Android
-在仓库根目录执行：
+From the repository root:
 
 ```bash
 make init-submodules
@@ -79,7 +90,7 @@ make doctor-android
 make BUILD_ANDROID=y
 ```
 
-常用命令：
+Common commands:
 
 ```bash
 make push
@@ -88,37 +99,37 @@ make logcat
 make clean
 ```
 
-说明：
-- `make BUILD_ANDROID=y` 会产出 `Spectrogrammer.apk`
-- APK 默认使用仓库内测试签名，仅适合本地安装与调试
-- `make doctor-android` 会检查 SDK、NDK、build-tools、子模块和必要命令
-- 当前 Android 目标 API 为 `29`
+Notes:
+- `make BUILD_ANDROID=y` produces `Spectrogrammer.apk`
+- The APK uses the repository test signing setup and is intended for local installation and debugging
+- `make doctor-android` checks SDK, NDK, build-tools, submodules, and required command-line tools
+- The current Android target API is `29`
 
 ### Linux
 ```bash
 make BUILD_ANDROID=n
 ```
 
-## 目录说明
-- `src/app`：频谱 UI、坐标轴、瀑布图、配置和 FFT 相关逻辑
-- `src/audio`：音频采集与平台驱动封装
-- `src/java`：Android 前台服务
-- `fastlane/metadata`：应用发布元数据和截图
-- `submodules/imgui`、`submodules/kissfft`：上游子模块依赖
+## Repository Layout
+- `src/app`: spectrum UI, axes, waterfall, configuration, and FFT-related logic
+- `src/audio`: audio capture and platform audio backends
+- `src/java`: Android foreground-service glue
+- `fastlane/metadata`: store listing metadata and screenshots
+- `submodules/imgui`, `submodules/kissfft`: upstream dependencies
 
-## 已知注意事项
-- 高采样率和 `未处理` 音频源是否可用，完全取决于设备和驱动实现。
-- 固定采样率档位如果设备不支持，程序会尽量回退到更低且可用的采样率。
-- 本仓库当前优先保证 Android 手机体验，Linux 路线仍保留但不是主要优化目标。
+## Notes
+- High sample rates and the `Unprocessed` audio source depend entirely on device and driver support.
+- When a fixed sample rate is not supported, the app falls back to a lower working rate when possible.
+- The repository currently prioritizes Android phone usability; Linux support remains available but is not the main optimization target.
 
-## 许可与来源
-- 本仓库是 `aguaviva/Spectrogrammer` 的 fork 和衍生版本，当前仍包含继承和改写自上游的代码，不是从零重写。
-- 当前仓库不对所有继承代码声明单一统一许可证；请以文件头声明、子目录许可证文件、[LICENSE](LICENSE) 和 [NOTICE](NOTICE) 为准。
-- 已明确可识别的来源包括 Android Open Source Project 原生音频样例、`cnlohr/rawdrawandroid`、`Dear ImGui`、`KISS FFT` 以及本 fork 新增代码。
-- 本 fork 新增且不含既有上游代码的独立文件，按 Apache License 2.0 提供；明确列表见 [NOTICE](NOTICE)。
+## Licensing and Provenance
+- This repository is a fork and derivative of `aguaviva/Spectrogrammer`, and it still contains inherited or adapted upstream code.
+- No single license applies to every file in this repository; see file headers, bundled component licenses, [LICENSE](LICENSE), and [NOTICE](NOTICE).
+- Known origins include Android Open Source Project native audio sample code, `cnlohr/rawdrawandroid`, `Dear ImGui`, `KISS FFT`, and fork-added code for this repository.
+- Fork-added standalone files that do not carry inherited upstream code are available under Apache License 2.0; the current list is summarized in [NOTICE](NOTICE).
 
-## 致谢
-- [aguaviva/spectrogrammer](https://github.com/aguaviva/spectrogrammer)
+## Acknowledgements
+- [aguaviva/Spectrogrammer](https://github.com/aguaviva/spectrogrammer)
 - [cnlohr/rawdrawandroid](https://github.com/cnlohr/rawdrawandroid)
 - [mborgerding/kissfft](https://github.com/mborgerding/kissfft)
 - [ocornut/imgui](https://github.com/ocornut/imgui)

@@ -1,14 +1,16 @@
-Spectrogrammer 是一个以 Android 手机触控为主的实时频谱分析器，也保留 Linux 构建能力。
+Spectrogrammer is a real-time audio spectrum analyzer designed primarily for Android phones, while still keeping a Linux build path for local development.
 
-主要功能：
-- 实时频谱曲线和瀑布图
-- 线性 / 普通对数 / 音乐对数 / Mel / Bark / ERB 频率刻度
-- 峰值保持曲线、峰值标记和可调回落
-- 手动游标线，显示当前位置频率与 dB
-- 双指缩放和平移查看局部频段
-- 可调音频源、采样率、FFT 大小、抽取级数、窗函数、滚动速度和平滑因子
-- 支持后台采集与保持亮屏
+Main features:
+- Real-time spectrum trace and waterfall
+- Linear / logarithmic / music-log / Mel / Bark / ERB frequency scales
+- Peak-hold trace, peak markers, and configurable falloff
+- Manual cursor line with live frequency and dB readout
+- Pinch zoom and horizontal pan for local frequency inspection
+- Adjustable audio source, sample rate, FFT size, decimation, window function, scroll speed, and smoothing
+- Stereo modes including mono, left, right, stereo mix, stereo difference, and stereo split
+- English by default, with an in-app switch to Simplified Chinese
+- Background capture and keep-screen-on support
 
-说明：
-- 高采样率档位是否可用取决于设备和驱动。
-- APK 主要面向本地安装与调试。
+Notes:
+- High sample rates depend on device and driver support.
+- The APK is mainly intended for local installation and debugging.

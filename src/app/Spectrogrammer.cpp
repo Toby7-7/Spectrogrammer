@@ -195,6 +195,21 @@ constexpr char kGitHubRepositoryUrl[] = "https://github.com/Toby7-7/Spectrogramm
 void rebuild_scale_locked(int outputWidth);
 void refresh_display_state_locked(bool updateWaterfall);
 
+bool use_chinese_ui()
+{
+    return gConfig.ui_language == UiLanguage::ChineseSimplified;
+}
+
+const char *ui_text(const char *english, const char *chinese)
+{
+    return use_chinese_ui() ? chinese : english;
+}
+
+const char *ui_language_label(UiLanguage language)
+{
+    return language == UiLanguage::ChineseSimplified ? "简体中文" : "English";
+}
+
 float top_safe_padding()
 {
     return std::max(kToolbarTopPadding, ImGui::GetIO().DisplaySize.y * 0.03f);
@@ -375,8 +390,8 @@ int mapped_right_source_channel()
 const char *mapped_source_channel_title(int source_channel)
 {
     if (!stereo_input_available())
-        return "单声道";
-    return source_channel == mapped_left_source_channel() ? "左" : "右";
+        return ui_text("Mono", "单声道");
+    return source_channel == mapped_left_source_channel() ? ui_text("L", "左") : ui_text("R", "右");
 }
 
 bool display_mode_is_split()
@@ -1305,16 +1320,16 @@ const char *audio_source_label(AudioSourceMode mode)
     switch (mode)
     {
     case AudioSourceMode::Default:
-        return "默认";
+        return ui_text("Default", "默认");
     case AudioSourceMode::Generic:
-        return "通用";
+        return ui_text("Generic", "通用");
     case AudioSourceMode::VoiceRecognition:
-        return "语音识别";
+        return ui_text("Voice recognition", "语音识别");
     case AudioSourceMode::Camcorder:
-        return "摄像机";
+        return ui_text("Camcorder", "摄像机");
     case AudioSourceMode::Unprocessed:
     default:
-        return "未处理";
+        return ui_text("Unprocessed", "未处理");
     }
 }
 
@@ -1323,18 +1338,18 @@ const char *input_channel_label(InputChannelMode mode)
     switch (mode)
     {
     case InputChannelMode::Mono:
-        return "单声道";
+        return ui_text("Mono", "单声道");
     case InputChannelMode::Left:
-        return "左声道";
+        return ui_text("Left channel", "左声道");
     case InputChannelMode::Right:
-        return "右声道";
+        return ui_text("Right channel", "右声道");
     case InputChannelMode::StereoMixed:
-        return "双声道混合";
+        return ui_text("Stereo mix", "双声道混合");
     case InputChannelMode::StereoDifference:
-        return "双声道相减";
+        return ui_text("Stereo difference", "双声道相减");
     case InputChannelMode::StereoIndependent:
     default:
-        return "双声道独立";
+        return ui_text("Stereo split", "双声道独立");
     }
 }
 
@@ -1342,20 +1357,26 @@ const char *input_gain_label(float gain_db)
 {
     static char buffer[48];
     const float gain_linear = powf(10.0f, clamp(gain_db, -24.0f, 24.0f) / 20.0f);
-    snprintf(buffer, sizeof(buffer), "%+.1f dB（%.2fx）", gain_db, gain_linear);
+    snprintf(buffer, sizeof(buffer), "%+.1f dB (%.2fx)", gain_db, gain_linear);
     return buffer;
 }
 
 const char *runtime_input_channel_status_label()
 {
-    static char buffer[64];
+    static char buffer[96];
     if (gInputChannelsFallbackActive)
     {
-        snprintf(buffer, sizeof(buffer), "实际单声道（双声道回退）");
+        snprintf(buffer, sizeof(buffer), "%s", ui_text("Actual mono (stereo fallback)", "实际单声道（双声道回退）"));
         return buffer;
     }
 
-    snprintf(buffer, sizeof(buffer), "实际%s", active_input_channel_count() >= 2 ? "双声道" : "单声道");
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "%s",
+        active_input_channel_count() >= 2
+            ? ui_text("Actual stereo", "实际双声道")
+            : ui_text("Actual mono", "实际单声道"));
     return buffer;
 }
 
@@ -1363,7 +1384,7 @@ const char *sampling_rate_label(SamplingRateMode mode, int sampleRate)
 {
     static char buffer[64];
     if (mode == SamplingRateMode::Auto)
-        snprintf(buffer, sizeof(buffer), "自动（%d Hz）", sampleRate);
+        snprintf(buffer, sizeof(buffer), "%s (%d Hz)", ui_text("Auto", "自动"), sampleRate);
     else
         snprintf(buffer, sizeof(buffer), "%d Hz", sampleRate);
     return buffer;
@@ -1374,14 +1395,14 @@ const char *window_function_label(WindowFunctionType type)
     switch (type)
     {
     case WindowFunctionType::Rectangular:
-        return "矩形窗";
+        return ui_text("Rectangular", "矩形窗");
     case WindowFunctionType::Hann:
-        return "汉宁窗";
+        return ui_text("Hann", "汉宁窗");
     case WindowFunctionType::Hamming:
-        return "汉明窗";
+        return ui_text("Hamming", "汉明窗");
     case WindowFunctionType::BlackmanHarris:
     default:
-        return "布莱克曼-哈里斯窗";
+        return ui_text("Blackman-Harris", "布莱克曼-哈里斯窗");
     }
 }
 
@@ -1390,9 +1411,9 @@ const char *frequency_axis_label(FrequencyAxisScale scale)
     switch (scale)
     {
     case FrequencyAxisScale::Linear:
-        return "线性";
+        return ui_text("Linear", "线性");
     case FrequencyAxisScale::Music:
-        return "音乐对数";
+        return ui_text("Music log", "音乐对数");
     case FrequencyAxisScale::Mel:
         return "Mel";
     case FrequencyAxisScale::Bark:
@@ -1401,7 +1422,7 @@ const char *frequency_axis_label(FrequencyAxisScale scale)
         return "ERB";
     case FrequencyAxisScale::Logarithmic:
     default:
-        return "普通对数";
+        return ui_text("Logarithmic", "普通对数");
     }
 }
 
@@ -1410,21 +1431,21 @@ const char *waterfall_size_label(WaterfallSizeMode mode)
     switch (mode)
     {
     case WaterfallSizeMode::OneQuarter:
-        return "1/4 屏";
+        return ui_text("1/4 screen", "1/4 屏");
     case WaterfallSizeMode::OneThird:
-        return "1/3 屏";
+        return ui_text("1/3 screen", "1/3 屏");
     case WaterfallSizeMode::TwoFifths:
-        return "2/5 屏";
+        return ui_text("2/5 screen", "2/5 屏");
     case WaterfallSizeMode::OneHalf:
-        return "1/2 屏";
+        return ui_text("1/2 screen", "1/2 屏");
     case WaterfallSizeMode::ThreeFifths:
-        return "3/5 屏";
+        return ui_text("3/5 screen", "3/5 屏");
     case WaterfallSizeMode::TwoThirds:
-        return "2/3 屏";
+        return ui_text("2/3 screen", "2/3 屏");
     case WaterfallSizeMode::ThreeQuarters:
-        return "3/4 屏";
+        return ui_text("3/4 screen", "3/4 屏");
     default:
-        return "2/3 屏";
+        return ui_text("2/3 screen", "2/3 屏");
     }
 }
 
@@ -1437,14 +1458,23 @@ const char *fft_size_label(const AppConfig &config)
 
 const char *decimations_label(const AppConfig &config)
 {
-    static char buffer[64];
-    snprintf(
-        buffer,
-        sizeof(buffer),
-        "%d（上限 %.1f kHz，%.1f Hz/bin）",
-        config.decimations,
-        GetEffectiveSampleRate(config) * 0.5f / 1000.0f,
-        GetEffectiveSampleRate(config) / (float)config.fft_size);
+    static char buffer[96];
+    if (use_chinese_ui())
+        snprintf(
+            buffer,
+            sizeof(buffer),
+            "%d（上限 %.1f kHz，%.1f Hz/bin）",
+            config.decimations,
+            GetEffectiveSampleRate(config) * 0.5f / 1000.0f,
+            GetEffectiveSampleRate(config) / (float)config.fft_size);
+    else
+        snprintf(
+            buffer,
+            sizeof(buffer),
+            "%d (limit %.1f kHz, %.1f Hz/bin)",
+            config.decimations,
+            GetEffectiveSampleRate(config) * 0.5f / 1000.0f,
+            GetEffectiveSampleRate(config) / (float)config.fft_size);
     return buffer;
 }
 
@@ -1452,24 +1482,29 @@ const char *peak_hold_falloff_label(float seconds)
 {
     static char buffer[48];
     if (seconds <= 0.0f)
-        snprintf(buffer, sizeof(buffer), "不回落");
+        snprintf(buffer, sizeof(buffer), "%s", ui_text("No falloff", "不回落"));
     else if (seconds >= 60.0f)
-        snprintf(buffer, sizeof(buffer), "%.1f 分钟", seconds / 60.0f);
+        snprintf(buffer, sizeof(buffer), use_chinese_ui() ? "%.1f 分钟" : "%.1f min", seconds / 60.0f);
     else
-        snprintf(buffer, sizeof(buffer), "%.1f 秒", seconds);
+        snprintf(buffer, sizeof(buffer), use_chinese_ui() ? "%.1f 秒" : "%.1f s", seconds);
     return buffer;
 }
 
 const char *peak_marker_label(int count)
 {
-    static char buffer[32];
-    snprintf(buffer, sizeof(buffer), "%d 个", count);
+    static char buffer[48];
+    if (use_chinese_ui())
+        snprintf(buffer, sizeof(buffer), "%d 个", count);
+    else
+        snprintf(buffer, sizeof(buffer), "%d %s", count, count == 1 ? "marker" : "markers");
     return buffer;
 }
 
 const char *peak_marker_source_label(PeakMarkerSourceMode mode)
 {
-    return mode == PeakMarkerSourceMode::ShortHold ? "短时峰值" : "实时峰值";
+    return mode == PeakMarkerSourceMode::ShortHold
+               ? ui_text("Short hold", "短时峰值")
+               : ui_text("Live", "实时峰值");
 }
 
 void render_section_title(const char *title)
@@ -1502,15 +1537,15 @@ const char *settings_page_title(SettingsPage page)
     switch (page)
     {
     case SettingsPage::AudioInput:
-        return "音频输入";
+        return ui_text("Audio Input", "音频输入");
     case SettingsPage::Analysis:
-        return "分析处理";
+        return ui_text("Analysis", "分析处理");
     case SettingsPage::SpectrumWaterfall:
-        return "频谱与瀑布";
+        return ui_text("Spectrum & Waterfall", "频谱与瀑布");
     case SettingsPage::System:
-        return "系统";
+        return ui_text("System", "系统");
     case SettingsPage::About:
-        return "关于";
+        return ui_text("About", "关于");
     case SettingsPage::Home:
     case SettingsPage::None:
     default:
@@ -1523,20 +1558,20 @@ const char *settings_page_window_id(SettingsPage page)
     switch (page)
     {
     case SettingsPage::Home:
-        return "设置首页";
+        return "settings_home";
     case SettingsPage::AudioInput:
-        return "音频输入页";
+        return "settings_audio_input";
     case SettingsPage::Analysis:
-        return "分析处理页";
+        return "settings_analysis";
     case SettingsPage::SpectrumWaterfall:
-        return "频谱与瀑布页";
+        return "settings_spectrum_waterfall";
     case SettingsPage::System:
-        return "系统页";
+        return "settings_system";
     case SettingsPage::About:
-        return "关于页";
+        return "settings_about";
     case SettingsPage::None:
     default:
-        return "设置";
+        return "settings";
     }
 }
 
@@ -1549,12 +1584,12 @@ SettingsPage settings_back_target(SettingsPage page)
 
 const char *settings_back_label(SettingsPage page)
 {
-    return page == SettingsPage::Home ? "返回主界面" : "返回设置";
+    return page == SettingsPage::Home ? ui_text("Back to main view", "返回主界面") : ui_text("Back to settings", "返回设置");
 }
 
 const char *enabled_state_label(bool enabled)
 {
-    return enabled ? "开" : "关";
+    return enabled ? ui_text("On", "开") : ui_text("Off", "关");
 }
 
 bool touch_invisible_button(const char *id, const ImVec2 &size, ImGuiButtonFlags flags = 0)
@@ -1612,10 +1647,10 @@ bool render_settings_header_button(const char *id, const char *label)
 const char *display_visibility_summary_label()
 {
     if (gConfig.show_spectrum && gConfig.show_waterfall)
-        return "频谱+瀑布";
+        return ui_text("Spectrum + waterfall", "频谱+瀑布");
     if (gConfig.show_spectrum)
-        return "仅频谱";
-    return "仅瀑布";
+        return ui_text("Spectrum only", "仅频谱");
+    return ui_text("Waterfall only", "仅瀑布");
 }
 
 void format_settings_page_summary(SettingsPage page, char *buffer, size_t buffer_size)
@@ -1638,30 +1673,49 @@ void format_settings_page_summary(SettingsPage page, char *buffer, size_t buffer
         snprintf(
             buffer,
             buffer_size,
-            "FFT %d / 抽取 %d / 平滑 %.2f",
+            use_chinese_ui() ? "FFT %d / 抽取 %d / 平滑 %.2f" : "FFT %d / Decimation %d / Smoothing %.2f",
             gConfig.fft_size,
             gConfig.decimations,
             gConfig.exponential_smoothing_factor);
         break;
     case SettingsPage::SpectrumWaterfall:
-        snprintf(
-            buffer,
-            buffer_size,
-            "%s / %s / 峰值保持 %s",
-            frequency_axis_label(gConfig.frequency_axis_scale),
-            display_visibility_summary_label(),
-            enabled_state_label(gConfig.max_hold_trace_enabled));
+        if (use_chinese_ui())
+            snprintf(
+                buffer,
+                buffer_size,
+                "%s / %s / 峰值保持 %s",
+                frequency_axis_label(gConfig.frequency_axis_scale),
+                display_visibility_summary_label(),
+                enabled_state_label(gConfig.max_hold_trace_enabled));
+        else
+            snprintf(
+                buffer,
+                buffer_size,
+                "%s / %s / Peak hold %s",
+                frequency_axis_label(gConfig.frequency_axis_scale),
+                display_visibility_summary_label(),
+                enabled_state_label(gConfig.max_hold_trace_enabled));
         break;
     case SettingsPage::System:
-        snprintf(
-            buffer,
-            buffer_size,
-            "后台采集 %s / 保持亮屏 %s",
-            enabled_state_label(gConfig.background_capture_enabled),
-            enabled_state_label(gConfig.stay_awake));
+        if (use_chinese_ui())
+            snprintf(
+                buffer,
+                buffer_size,
+                "语言 %s / 后台采集 %s / 保持亮屏 %s",
+                ui_language_label(gConfig.ui_language),
+                enabled_state_label(gConfig.background_capture_enabled),
+                enabled_state_label(gConfig.stay_awake));
+        else
+            snprintf(
+                buffer,
+                buffer_size,
+                "Language %s / Background capture %s / Keep screen on %s",
+                ui_language_label(gConfig.ui_language),
+                enabled_state_label(gConfig.background_capture_enabled),
+                enabled_state_label(gConfig.stay_awake));
         break;
     case SettingsPage::About:
-        snprintf(buffer, buffer_size, "仓库链接、来源说明与开源信息");
+        snprintf(buffer, buffer_size, "%s", ui_text("Repository links, provenance, and open-source notices", "仓库链接、来源说明与开源信息"));
         break;
     case SettingsPage::Home:
     case SettingsPage::None:
@@ -1792,7 +1846,7 @@ bool render_settings_navigation_card(const char *id, const char *title, const ch
 
 void render_audio_input_settings()
 {
-    render_setting_label("音频源");
+    render_setting_label(ui_text("Audio source", "音频源"));
     set_full_width_item();
     if (ImGui::BeginCombo("##audio_source", audio_source_label(gConfig.audio_source_mode)))
     {
@@ -1818,7 +1872,7 @@ void render_audio_input_settings()
         ImGui::EndCombo();
     }
 
-    render_setting_label("声道模式");
+    render_setting_label(ui_text("Channel mode", "声道模式"));
     set_full_width_item();
     if (ImGui::BeginCombo("##input_channel_mode", input_channel_label(gConfig.input_channel_mode)))
     {
@@ -1853,7 +1907,7 @@ void render_audio_input_settings()
     if (gConfig.input_channel_mode == InputChannelMode::StereoIndependent)
     {
         bool swap_stereo_order = gConfig.swap_stereo_order;
-        if (ImGui::Checkbox("交换左右顺序", &swap_stereo_order))
+        if (ImGui::Checkbox(ui_text("Swap left/right order", "交换左右顺序"), &swap_stereo_order))
         {
             gConfig.swap_stereo_order = swap_stereo_order;
             mark_config_dirty();
@@ -1861,7 +1915,7 @@ void render_audio_input_settings()
         }
     }
 
-    render_setting_label("输入增益");
+    render_setting_label(ui_text("Input gain", "输入增益"));
     float input_gain_db = gConfig.input_gain_db;
     set_full_width_item();
     if (ImGui::SliderFloat("##input_gain_db", &input_gain_db, -24.0f, 24.0f, "%.1f dB"))
@@ -1870,13 +1924,16 @@ void render_audio_input_settings()
         mark_config_dirty();
         apply_display_change(false, false);
     }
-    ImGui::TextDisabled("负值减小，正值放大：%s", input_gain_label(gConfig.input_gain_db));
+    if (use_chinese_ui())
+        ImGui::TextDisabled("负值减小，正值放大：%s", input_gain_label(gConfig.input_gain_db));
+    else
+        ImGui::TextDisabled("Negative reduces, positive boosts: %s", input_gain_label(gConfig.input_gain_db));
 
-    render_setting_label("采样率");
+    render_setting_label(ui_text("Sample rate", "采样率"));
     set_full_width_item();
     if (ImGui::BeginCombo("##sampling_rate", sampling_rate_label(gConfig.sampling_rate_mode, configured_sample_rate())))
     {
-        if (ImGui::Selectable("自动（48000 Hz）", gConfig.sampling_rate_mode == SamplingRateMode::Auto))
+        if (ImGui::Selectable(ui_text("Auto (48000 Hz)", "自动（48000 Hz）"), gConfig.sampling_rate_mode == SamplingRateMode::Auto))
         {
             gConfig.sampling_rate_mode = SamplingRateMode::Auto;
             gConfig.sample_rate_hz = kDefaultAndroidSampleRate;
@@ -1900,12 +1957,16 @@ void render_audio_input_settings()
         }
         ImGui::EndCombo();
     }
-    ImGui::TextDisabled("高采样率取决于设备和驱动支持，不支持时可能无法启动该档位。");
+    ImGui::TextDisabled(
+        "%s",
+        ui_text(
+            "Higher sample rates depend on device and driver support and may fail to start.",
+            "高采样率取决于设备和驱动支持，不支持时可能无法启动该档位。"));
 }
 
 void render_analysis_settings()
 {
-    render_setting_label("FFT 大小");
+    render_setting_label(ui_text("FFT size", "FFT 大小"));
     set_full_width_item();
     if (ImGui::BeginCombo("##fft_size", fft_size_label(gConfig)))
     {
@@ -1913,7 +1974,10 @@ void render_analysis_settings()
         for (int value : fft_sizes)
         {
             char label[64];
-            snprintf(label, sizeof(label), "%d（%.1f Hz/bin）", value, GetEffectiveSampleRate(gConfig) / (float)value);
+            if (use_chinese_ui())
+                snprintf(label, sizeof(label), "%d（%.1f Hz/bin）", value, GetEffectiveSampleRate(gConfig) / (float)value);
+            else
+                snprintf(label, sizeof(label), "%d (%.1f Hz/bin)", value, GetEffectiveSampleRate(gConfig) / (float)value);
             const bool selected = gConfig.fft_size == value;
             if (ImGui::Selectable(label, selected))
             {
@@ -1927,7 +1991,7 @@ void render_analysis_settings()
         ImGui::EndCombo();
     }
 
-    render_setting_label("抽取级数");
+    render_setting_label(ui_text("Decimation stages", "抽取级数"));
     set_full_width_item();
     if (ImGui::BeginCombo("##decimations", decimations_label(gConfig)))
     {
@@ -1936,7 +2000,10 @@ void render_analysis_settings()
             char label[64];
             const float dc_resolution = (configured_sample_rate() / (float)(1 << value)) / (float)gConfig.fft_size;
             const float max_freq_khz = (configured_sample_rate() / (float)(1 << value)) * 0.5f / 1000.0f;
-            snprintf(label, sizeof(label), "%d（上限 %.1f kHz，%.1f Hz/bin）", value, max_freq_khz, dc_resolution);
+            if (use_chinese_ui())
+                snprintf(label, sizeof(label), "%d（上限 %.1f kHz，%.1f Hz/bin）", value, max_freq_khz, dc_resolution);
+            else
+                snprintf(label, sizeof(label), "%d (limit %.1f kHz, %.1f Hz/bin)", value, max_freq_khz, dc_resolution);
             const bool selected = gConfig.decimations == value;
             if (ImGui::Selectable(label, selected))
             {
@@ -1950,7 +2017,7 @@ void render_analysis_settings()
         ImGui::EndCombo();
     }
 
-    render_setting_label("窗函数");
+    render_setting_label(ui_text("Window function", "窗函数"));
     set_full_width_item();
     if (ImGui::BeginCombo("##window_function", window_function_label(gConfig.window_function)))
     {
@@ -1976,7 +2043,7 @@ void render_analysis_settings()
     }
 
     float smoothing = gConfig.exponential_smoothing_factor;
-    render_setting_label("指数平滑因子（越大越平滑）");
+    render_setting_label(ui_text("Exponential smoothing (higher is smoother)", "指数平滑因子（越大越平滑）"));
     set_full_width_item();
     if (ImGui::SliderFloat("##smoothing_factor", &smoothing, 0.0f, 0.95f, "%.2f"))
     {
@@ -1987,8 +2054,8 @@ void render_analysis_settings()
 
 void render_spectrum_waterfall_settings()
 {
-    render_section_title("频谱");
-    render_setting_label("频率轴刻度");
+    render_section_title(ui_text("Spectrum", "频谱"));
+    render_setting_label(ui_text("Frequency axis scale", "频率轴刻度"));
     set_full_width_item();
     if (ImGui::BeginCombo("##frequency_axis_scale", frequency_axis_label(gConfig.frequency_axis_scale)))
     {
@@ -2016,16 +2083,16 @@ void render_spectrum_waterfall_settings()
     }
 
     float overlay_scale = gConfig.overlay_text_scale;
-    render_setting_label("图上标注字号");
+    render_setting_label(ui_text("Overlay text size", "图上标注字号"));
     set_full_width_item();
-    if (ImGui::SliderFloat("##overlay_text_scale", &overlay_scale, 0.7f, 1.8f, "%.2f 倍"))
+    if (ImGui::SliderFloat("##overlay_text_scale", &overlay_scale, 0.7f, 1.8f, use_chinese_ui() ? "%.2f 倍" : "%.2fx"))
     {
         gConfig.overlay_text_scale = overlay_scale;
         mark_config_dirty();
     }
 
     float overlay_alpha = gConfig.overlay_text_alpha;
-    render_setting_label("图上标注透明度");
+    render_setting_label(ui_text("Overlay text opacity", "图上标注透明度"));
     set_full_width_item();
     if (ImGui::SliderFloat("##overlay_text_alpha", &overlay_alpha, 0.25f, 1.0f, "%.2f"))
     {
@@ -2033,9 +2100,9 @@ void render_spectrum_waterfall_settings()
         mark_config_dirty();
     }
 
-    render_section_title("峰值");
+    render_section_title(ui_text("Peak Hold", "峰值"));
     bool max_hold = gConfig.max_hold_trace_enabled;
-    if (ImGui::Checkbox("显示峰值保持曲线", &max_hold))
+    if (ImGui::Checkbox(ui_text("Show peak-hold trace", "显示峰值保持曲线"), &max_hold))
     {
         gConfig.max_hold_trace_enabled = max_hold;
         if (!max_hold)
@@ -2050,17 +2117,20 @@ void render_spectrum_waterfall_settings()
     if (gConfig.max_hold_trace_enabled)
     {
         float hold_falloff_seconds = gConfig.peak_hold_falloff_seconds;
-        render_setting_label("峰值回落时长");
+        render_setting_label(ui_text("Peak falloff time", "峰值回落时长"));
         set_full_width_item();
-        if (ImGui::SliderFloat("##peak_hold_falloff", &hold_falloff_seconds, 0.0f, 120.0f, "%.1f 秒"))
+        if (ImGui::SliderFloat("##peak_hold_falloff", &hold_falloff_seconds, 0.0f, 120.0f, use_chinese_ui() ? "%.1f 秒" : "%.1f s"))
         {
             gConfig.peak_hold_falloff_seconds = hold_falloff_seconds;
             mark_config_dirty();
         }
-        ImGui::TextDisabled("当前：%s", peak_hold_falloff_label(gConfig.peak_hold_falloff_seconds));
+        if (use_chinese_ui())
+            ImGui::TextDisabled("当前：%s", peak_hold_falloff_label(gConfig.peak_hold_falloff_seconds));
+        else
+            ImGui::TextDisabled("Current: %s", peak_hold_falloff_label(gConfig.peak_hold_falloff_seconds));
     }
 
-    render_setting_label("峰值标记");
+    render_setting_label(ui_text("Peak markers", "峰值标记"));
     set_full_width_item();
     if (ImGui::BeginCombo("##peak_markers", peak_marker_label(gConfig.peak_marker_count)))
     {
@@ -2068,7 +2138,10 @@ void render_spectrum_waterfall_settings()
         for (int count : marker_counts)
         {
             char label[32];
-            snprintf(label, sizeof(label), "%d 个", count);
+            if (use_chinese_ui())
+                snprintf(label, sizeof(label), "%d 个", count);
+            else
+                snprintf(label, sizeof(label), "%d %s", count, count == 1 ? "marker" : "markers");
             const bool selected = gConfig.peak_marker_count == count;
             if (ImGui::Selectable(label, selected))
             {
@@ -2082,7 +2155,7 @@ void render_spectrum_waterfall_settings()
         ImGui::EndCombo();
     }
 
-    render_setting_label("峰值标记来源");
+    render_setting_label(ui_text("Peak marker source", "峰值标记来源"));
     set_full_width_item();
     if (ImGui::BeginCombo("##peak_marker_source", peak_marker_source_label(gConfig.peak_marker_source_mode)))
     {
@@ -2105,9 +2178,9 @@ void render_spectrum_waterfall_settings()
         ImGui::EndCombo();
     }
 
-    render_section_title("瀑布图");
+    render_section_title(ui_text("Waterfall", "瀑布图"));
     bool show_spectrum = gConfig.show_spectrum;
-    if (ImGui::Checkbox("显示上方频谱图", &show_spectrum))
+    if (ImGui::Checkbox(ui_text("Show upper spectrum", "显示上方频谱图"), &show_spectrum))
     {
         gConfig.show_spectrum = show_spectrum;
         if (!gConfig.show_spectrum && !gConfig.show_waterfall)
@@ -2117,7 +2190,7 @@ void render_spectrum_waterfall_settings()
     }
 
     bool show_waterfall = gConfig.show_waterfall;
-    if (ImGui::Checkbox("显示瀑布图", &show_waterfall))
+    if (ImGui::Checkbox(ui_text("Show waterfall", "显示瀑布图"), &show_waterfall))
     {
         gConfig.show_waterfall = show_waterfall;
         if (!gConfig.show_spectrum && !gConfig.show_waterfall)
@@ -2126,7 +2199,7 @@ void render_spectrum_waterfall_settings()
         apply_display_change(false, false);
     }
 
-    render_setting_label("瀑布图高度");
+    render_setting_label(ui_text("Waterfall height", "瀑布图高度"));
     set_full_width_item();
     if (ImGui::BeginCombo("##waterfall_size", waterfall_size_label(gConfig.waterfall_size_mode)))
     {
@@ -2154,7 +2227,7 @@ void render_spectrum_waterfall_settings()
     }
 
     float scroll_speed_percent = interval_ms_to_scroll_speed_percent(gConfig.desired_transform_interval_ms);
-    render_setting_label("滚动速度（慢到快）");
+    render_setting_label(ui_text("Scroll speed (slow to fast)", "滚动速度（慢到快）"));
     set_full_width_item();
     if (ImGui::SliderFloat("##transform_interval", &scroll_speed_percent, 0.0f, 100.0f, "%.0f%%"))
     {
@@ -2162,20 +2235,45 @@ void render_spectrum_waterfall_settings()
         mark_config_dirty();
         restart_processing_session();
     }
-    ImGui::TextDisabled("当前约 %.0f ms/行", gConfig.desired_transform_interval_ms);
+    if (use_chinese_ui())
+        ImGui::TextDisabled("当前约 %.0f ms/行", gConfig.desired_transform_interval_ms);
+    else
+        ImGui::TextDisabled("Current: about %.0f ms/row", gConfig.desired_transform_interval_ms);
 }
 
 void render_system_settings()
 {
+    render_setting_label(ui_text("Language", "语言"));
+    set_full_width_item();
+    if (ImGui::BeginCombo("##ui_language", ui_language_label(gConfig.ui_language)))
+    {
+        const UiLanguage items[] = {
+            UiLanguage::English,
+            UiLanguage::ChineseSimplified,
+        };
+        for (UiLanguage language : items)
+        {
+            const bool selected = gConfig.ui_language == language;
+            if (ImGui::Selectable(ui_language_label(language), selected))
+            {
+                gConfig.ui_language = language;
+                mark_config_dirty();
+            }
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
     bool background_capture = gConfig.background_capture_enabled;
-    if (ImGui::Checkbox("后台采集", &background_capture))
+    if (ImGui::Checkbox(ui_text("Background capture", "后台采集"), &background_capture))
     {
         gConfig.background_capture_enabled = background_capture;
         mark_config_dirty();
     }
 
     bool stay_awake = gConfig.stay_awake;
-    if (ImGui::Checkbox("保持亮屏", &stay_awake))
+    if (ImGui::Checkbox(ui_text("Keep screen on", "保持亮屏"), &stay_awake))
     {
         gConfig.stay_awake = stay_awake;
         mark_config_dirty();
@@ -2184,12 +2282,16 @@ void render_system_settings()
 
 void render_about_page()
 {
-    ImGui::TextWrapped("Spectrogrammer 的中文移动版 fork，当前仓库维护在 GitHub。");
-    ImGui::TextWrapped("仓库：%s", kGitHubRepositoryUrl);
-    if (touch_button("打开 GitHub 仓库", ImVec2(ImGui::GetContentRegionAvail().x, 0.0f)))
+    ImGui::TextWrapped(
+        "%s",
+        ui_text(
+            "This fork of Spectrogrammer is maintained on GitHub and focuses on mobile-first audio spectrum analysis.",
+            "这是一个面向移动端音频频谱分析的 Spectrogrammer fork，当前仓库维护在 GitHub。"));
+    ImGui::TextWrapped("%s: %s", ui_text("Repository", "仓库"), kGitHubRepositoryUrl);
+    if (touch_button(ui_text("Open GitHub repository", "打开 GitHub 仓库"), ImVec2(ImGui::GetContentRegionAvail().x, 0.0f)))
         open_url_external(kGitHubRepositoryUrl);
 #ifndef ANDROID
-    ImGui::TextDisabled("当前平台仅显示仓库链接，不直接拉起浏览器。");
+    ImGui::TextDisabled("%s", ui_text("This platform only shows the repository URL and does not open a browser directly.", "当前平台仅显示仓库链接，不直接拉起浏览器。"));
 #endif
 }
 
@@ -2263,11 +2365,11 @@ void draw_toolbar()
     const float width = ImGui::GetContentRegionAvail().x;
     const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * 3.0f) / 4.0f;
 
-    if (touch_button(gDisplayPaused ? "继续" : "暂停", ImVec2(button_width, row_height)))
+    if (touch_button(gDisplayPaused ? ui_text("Resume", "继续") : ui_text("Pause", "暂停"), ImVec2(button_width, row_height)))
         gDisplayPaused = !gDisplayPaused;
 
     ImGui::SameLine();
-    if (touch_button("清除峰值", ImVec2(button_width, row_height)))
+    if (touch_button(ui_text("Clear Peaks", "清除峰值"), ImVec2(button_width, row_height)))
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
         clear_peak_hold_locked();
@@ -2276,7 +2378,7 @@ void draw_toolbar()
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!gCursorActive);
-    if (touch_button("清除游标", ImVec2(button_width, row_height)))
+    if (touch_button(ui_text("Clear Cursor", "清除游标"), ImVec2(button_width, row_height)))
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
         gCursorActive = false;
@@ -2285,7 +2387,7 @@ void draw_toolbar()
     ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (touch_button("设置", ImVec2(button_width, row_height)))
+    if (touch_button(ui_text("Settings", "设置"), ImVec2(button_width, row_height)))
         set_settings_page(SettingsPage::Home);
     ImGui::PopStyleVar(3);
 
@@ -2306,18 +2408,33 @@ void draw_toolbar()
         channel_status,
         sizeof(channel_status),
         "%s",
-        gInputChannelsFallbackActive ? "单声道（双声道回退）" : (active_input_channel_count() >= 2 ? "双声道" : "单声道"));
-    snprintf(
-        status,
-        sizeof(status),
-        "输入 %.0f Hz / %s / %s  ·  视图 %s - %s  ·  FFT %d  ·  %.1f Hz/bin",
-        gInputSampleRate,
-        input_channel_label(gConfig.input_channel_mode),
-        channel_status,
-        axis_min_label,
-        axis_max_label,
-        gConfig.fft_size,
-        gEffectiveSampleRate / (float)gConfig.fft_size);
+        gInputChannelsFallbackActive
+            ? ui_text("Mono (stereo fallback)", "单声道（双声道回退）")
+            : (active_input_channel_count() >= 2 ? ui_text("Stereo", "双声道") : ui_text("Mono", "单声道")));
+    if (use_chinese_ui())
+        snprintf(
+            status,
+            sizeof(status),
+            "输入 %.0f Hz / %s / %s  ·  视图 %s - %s  ·  FFT %d  ·  %.1f Hz/bin",
+            gInputSampleRate,
+            input_channel_label(gConfig.input_channel_mode),
+            channel_status,
+            axis_min_label,
+            axis_max_label,
+            gConfig.fft_size,
+            gEffectiveSampleRate / (float)gConfig.fft_size);
+    else
+        snprintf(
+            status,
+            sizeof(status),
+            "Input %.0f Hz / %s / %s  ·  View %s - %s  ·  FFT %d  ·  %.1f Hz/bin",
+            gInputSampleRate,
+            input_channel_label(gConfig.input_channel_mode),
+            channel_status,
+            axis_min_label,
+            axis_max_label,
+            gConfig.fft_size,
+            gEffectiveSampleRate / (float)gConfig.fft_size);
     ImGui::TextDisabled("%s", status);
     ImGui::SetCursorPosY(std::max(0.0f, ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y));
     ImGui::Dummy(ImVec2(0.0f, 0.0f));
@@ -2328,7 +2445,7 @@ void draw_hold_popup()
     const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.92f, -1));
-    if (!ImGui::BeginPopupModal("对比菜单", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    if (!ImGui::BeginPopupModal(ui_text("Compare Menu###compare_menu", "对比菜单###compare_menu"), nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         gCloseHoldPopupRequested = false;
         return;
@@ -2354,11 +2471,11 @@ void draw_hold_popup()
         restart_processing_session();
     }
 
-    if (touch_button("记录当前曲线"))
+    if (touch_button(ui_text("Save current trace", "记录当前曲线")))
         copy_current_to_reference();
 
     ImGui::SameLine();
-    if (touch_button("清除基线"))
+    if (touch_button(ui_text("Clear reference", "清除基线")))
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
         clear_reference_hold_locked();
@@ -2366,7 +2483,7 @@ void draw_hold_popup()
     }
 
     ImGui::Separator();
-    if (touch_button("关闭"))
+    if (touch_button(ui_text("Close", "关闭")))
         ImGui::CloseCurrentPopup();
 
     ImGui::EndPopup();
@@ -2759,7 +2876,7 @@ bool Spectrogrammer_MainLoopStep()
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 20.0f));
-    ImGui::Begin("主窗口", nullptr, window_flags);
+    ImGui::Begin("main_window", nullptr, window_flags);
 
     if (gSettingsPage != SettingsPage::None)
         render_settings_page();
@@ -2851,4 +2968,9 @@ bool Spectrogrammer_ShouldStayAwake()
 bool Spectrogrammer_ShouldRunInBackground()
 {
     return gConfig.background_capture_enabled;
+}
+
+bool Spectrogrammer_UseChineseUi()
+{
+    return use_chinese_ui();
 }

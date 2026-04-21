@@ -15,15 +15,17 @@ import android.os.IBinder;
 public class CaptureForegroundService extends Service {
     private static final String CHANNEL_ID = "spectrogrammer_capture";
     private static final int NOTIFICATION_ID = 1001;
+    private boolean useChineseUi = false;
 
     @Override
     public void onCreate() {
         super.onCreate();
-        createNotificationChannel();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        useChineseUi = intent != null && intent.getBooleanExtra("use_chinese_ui", false);
+        createNotificationChannel();
         Notification notification = buildNotification();
         startForeground(NOTIFICATION_ID, notification);
         return START_STICKY;
@@ -47,9 +49,11 @@ public class CaptureForegroundService extends Service {
 
         NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "频谱采集",
+                useChineseUi ? "频谱采集" : "Spectrum Capture",
                 NotificationManager.IMPORTANCE_LOW);
-        channel.setDescription("Spectrogrammer 后台持续采集");
+        channel.setDescription(useChineseUi
+                ? "Spectrogrammer 后台持续采集"
+                : "Continuous background capture for Spectrogrammer");
 
         NotificationManager notificationManager = getSystemService(NotificationManager.class);
         if (notificationManager != null) {
@@ -78,8 +82,8 @@ public class CaptureForegroundService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
 
-        builder.setContentTitle("频谱仪正在采集")
-                .setContentText("后台频谱分析已启用")
+        builder.setContentTitle(useChineseUi ? "频谱仪正在采集" : "Spectrogrammer is capturing")
+                .setContentText(useChineseUi ? "后台频谱分析已启用" : "Background spectrum analysis is enabled")
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)

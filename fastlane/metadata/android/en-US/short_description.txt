@@ -1,1 +1,1 @@
-中文优先的实时频谱分析器，支持瀑布图、峰值保持和触控缩放
+Real-time audio spectrum analyzer with waterfall, peak hold, and touch zoom
