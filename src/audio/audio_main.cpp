@@ -13,12 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-//#include "jni_interface.h"
 #include "audio_recorder.h"
 #include "audio_common.h"
-#include "audio_SLES.h"
-//#include <jni.h>
-#include <SLES/OpenSLES_Android.h>
 #include <sys/types.h>
 #include <cassert>
 #include <cstring>
@@ -44,13 +40,38 @@ struct EchoAudioEngine {
 static EchoAudioEngine engine;
 
 bool EngineService(void *ctx, uint32_t msg, void *data);
-void SetBufQueues(float sampleRate, AudioQueue *freeQ, AudioQueue *recQ);
 bool Audio_createAudioRecorder();
-void Audio_deleteSLEngine();
 
+// Releases everything Audio_init allocated.  Safe to call at any time, and
+// idempotent.
+static void Audio_releaseAll() {
+  if (engine.recorder_ != nullptr) {
+    delete engine.recorder_;
+    engine.recorder_ = nullptr;
+  }
+  if (engine.recBufQueue_ != nullptr) {
+    delete engine.recBufQueue_;
+    engine.recBufQueue_ = nullptr;
+  }
+  if (engine.freeBufQueue_ != nullptr) {
+    delete engine.freeBufQueue_;
+    engine.freeBufQueue_ = nullptr;
+  }
+  if (engine.bufs_ != nullptr) {
+    releaseSampleBufs(engine.bufs_, engine.bufCount_);
+    engine.bufs_ = nullptr;
+    engine.bufCount_ = 0;
+  }
+  if (engine.slEngineObj_ != nullptr) {
+    (*engine.slEngineObj_)->Destroy(engine.slEngineObj_);
+    engine.slEngineObj_ = nullptr;
+    engine.slEngineItf_ = nullptr;
+  }
+}
 
 bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset, int inputChannels) {
-  SLresult result;
+  // Guard against double init leaking the previous engine.
+  Audio_releaseAll();
   memset(&engine, 0, sizeof(engine));
 
   engine.fastPathSampleRate_ = static_cast<SLmilliHertz>(sampleRate);
@@ -59,41 +80,61 @@ bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset, 
   engine.bitsPerSample_ = SL_PCMSAMPLEFORMAT_FIXED_16;
   engine.recordingPreset_ = recordingPreset;
 
-  result = slCreateEngine(&engine.slEngineObj_, 0, NULL, 0, NULL, NULL);
-  if (result != SL_RESULT_SUCCESS)
+  SLresult result = slCreateEngine(&engine.slEngineObj_, 0, NULL, 0, NULL, NULL);
+  if (result != SL_RESULT_SUCCESS) {
+    LOGE("slCreateEngine failed: 0x%08x", result);
     return false;
+  }
 
   result = (*engine.slEngineObj_)->Realize(engine.slEngineObj_, SL_BOOLEAN_FALSE);
-  if (result != SL_RESULT_SUCCESS)
+  if (result != SL_RESULT_SUCCESS) {
+    LOGE("Realize(engine) failed: 0x%08x", result);
+    Audio_releaseAll();
     return false;
+  }
 
   result = (*engine.slEngineObj_)->GetInterface(engine.slEngineObj_, SL_IID_ENGINE, &engine.slEngineItf_);
-  if (result != SL_RESULT_SUCCESS)
+  if (result != SL_RESULT_SUCCESS) {
+    LOGE("GetInterface(SL_IID_ENGINE) failed: 0x%08x", result);
+    Audio_releaseAll();
     return false;
+  }
 
   // compute the RECOMMENDED fast audio buffer size:
   //   the lower latency required
   //     *) the smaller the buffer should be (adjust it here) AND
   //     *) the less buffering should be before starting player AFTER
   //        receiving the recorder buffer
-  //   Adjust the bufSize here to fit your bill [before it busts]
   uint32_t bufSize = engine.fastPathFramesPerBuf_ * engine.sampleChannels_ * engine.bitsPerSample_;
   bufSize = (bufSize + 7) >> 3;  // bits --> byte
   engine.bufCount_ = BUF_COUNT;
   engine.bufs_ = allocateSampleBufs(engine.bufCount_, bufSize);
-  assert(engine.bufs_);
+  if (engine.bufs_ == nullptr) {
+    LOGE("allocateSampleBufs failed (%u bufs x %u bytes)", engine.bufCount_, bufSize);
+    Audio_releaseAll();
+    return false;
+  }
 
   engine.freeBufQueue_ = new AudioQueue(engine.bufCount_);
   engine.recBufQueue_ = new AudioQueue(engine.bufCount_);
-  assert(engine.freeBufQueue_ && engine.recBufQueue_);
+  if (engine.freeBufQueue_ == nullptr || engine.recBufQueue_ == nullptr) {
+    LOGE("AudioQueue allocation failed");
+    Audio_releaseAll();
+    return false;
+  }
   for (uint32_t i = 0; i < engine.bufCount_; i++) {
     engine.freeBufQueue_->push(&engine.bufs_[i]);
   }
 
   if (!Audio_createAudioRecorder()) {
-    Audio_deleteSLEngine();
+    LOGE("Audio_createAudioRecorder failed");
+    Audio_releaseAll();
     return false;
   }
+
+  LOGI("Audio_init ok: rate=%u frames=%u channels=%u preset=%d",
+       (unsigned)sampleRate, (unsigned)framesPerBuf,
+       (unsigned)engine.sampleChannels_, recordingPreset);
   return true;
 }
 
@@ -101,17 +142,6 @@ void Audio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ)
 {
   *pFreeQ = engine.freeBufQueue_;
   *pRecQ = engine.recBufQueue_;
-}
-
-void Audio_setRecorderCallback(ENGINE_CALLBACK callback)
-{
-    if (engine.recorder_ != nullptr)
-      engine.recorder_->RegisterCallback(callback, (void *)&engine);
-}
-
-float Audio_getSampleRate()
-{
-    return engine.fastPathSampleRate_;
 }
 
 int Audio_getInputChannelCount()
@@ -130,75 +160,34 @@ bool Audio_createAudioRecorder()
   sampleFormat.sampleRate_ = engine.fastPathSampleRate_;
   sampleFormat.framesPerBuf_ = engine.fastPathFramesPerBuf_;
   engine.recorder_ = new AudioRecorder(&sampleFormat, engine.slEngineItf_, static_cast<SLuint32>(engine.recordingPreset_));
-  if (!engine.recorder_ || !engine.recorder_->IsValid()) {
+  if (engine.recorder_ == nullptr || !engine.recorder_->IsValid()) {
+    LOGE("AudioRecorder invalid");
     delete engine.recorder_;
     engine.recorder_ = nullptr;
-    return JNI_FALSE;
+    return false;
   }
   engine.recorder_->SetBufQueues(engine.freeBufQueue_, engine.recBufQueue_);
   engine.recorder_->RegisterCallback(EngineService, (void *)&engine);
-  return JNI_TRUE;
-}
-
-void Audio_deleteAudioRecorder() {
-  if (engine.recorder_) {
-    LOGE("Buf Disrtibutions: PlayerDev=%d, RecDev=%d, FreeQ=%d, RecQ=%d",
-         0,
-         engine.recorder_->dbgGetDevBufCount(),
-         engine.freeBufQueue_ ? engine.freeBufQueue_->size() : 0,
-         engine.recBufQueue_ ? engine.recBufQueue_->size() : 0);
-    delete engine.recorder_;
-  }
-  engine.recorder_ = nullptr;
+  return true;
 }
 
 bool Audio_startPlay() {
   if (engine.recorder_ == nullptr || !engine.recorder_->IsValid())
     return false;
   engine.frameCount_ = 0;
-  /*
-   * start player: make it into waitForData state
-   */
   return engine.recorder_->Start() == SL_BOOLEAN_TRUE;
 }
 
-void JNICALL Audio_stopPlay() {
-  engine.recorder_->Stop();
-  //delete engine.recorder_;
-  //engine.recorder_ = nullptr;
-}
-
-void JNICALL Audio_pausePlay() {
-  engine.recorder_->Pause();
-}
-
-void Audio_deleteSLEngine()
-{
-  //assert(engine.freeBufQueue_->size()==engine.bufCount_);
-
-  delete engine.recBufQueue_;
-  delete engine.freeBufQueue_;
-  releaseSampleBufs(engine.bufs_, engine.bufCount_);
-
-  if (engine.slEngineObj_ != nullptr) {
-    (*engine.slEngineObj_)->Destroy(engine.slEngineObj_);
-    engine.slEngineObj_ = nullptr;
-    engine.slEngineItf_ = nullptr;
-  }
-}
-
 uint32_t dbgEngineGetBufCount() {
-  uint32_t count = 0;//engine.player_->dbgGetDevBufCount();
-  count += engine.recorder_->dbgGetDevBufCount();
-  count += engine.freeBufQueue_->size();
-  count += engine.recBufQueue_->size();
+  uint32_t count = 0;
+  count += engine.recorder_ ? (uint32_t)engine.recorder_->dbgGetDevBufCount() : 0;
+  count += engine.freeBufQueue_ ? engine.freeBufQueue_->size() : 0;
+  count += engine.recBufQueue_ ? engine.recBufQueue_->size() : 0;
 
-  LOGE(
-      "Buf Disrtibutions: PlayerDev=%d, RecDev=%d, FreeQ=%d, "
-      "RecQ=%d",
-      0,//engine.player_->dbgGetDevBufCount(),
-      engine.recorder_->dbgGetDevBufCount(), engine.freeBufQueue_->size(),
-      engine.recBufQueue_->size());
+  LOGI("Buf distributions: RecDev=%u FreeQ=%u RecQ=%u",
+       engine.recorder_ ? (uint32_t)engine.recorder_->dbgGetDevBufCount() : 0,
+       engine.freeBufQueue_ ? engine.freeBufQueue_->size() : 0,
+       engine.recBufQueue_ ? engine.recBufQueue_->size() : 0);
   if (count != engine.bufCount_) {
     LOGE("====Lost Bufs among the queue(supposed = %d, found = %d)", BUF_COUNT, count);
   }
@@ -216,14 +205,12 @@ bool EngineService(void *ctx, uint32_t msg, void *data) {
       break;
     }
     case ENGINE_SERVICE_MSG_RECORDED_AUDIO_AVAILABLE: {
-      // adding audio delay effect
       sample_buf *buf = static_cast<sample_buf *>(data);
       assert(engine.fastPathFramesPerBuf_ == buf->size_ / engine.sampleChannels_ / (engine.bitsPerSample_ / 8));
-
       break;
     }
     default:
-      assert(false);
+      LOGE("EngineService: unknown message %u", msg);
       return false;
   }
 
@@ -232,6 +219,5 @@ bool EngineService(void *ctx, uint32_t msg, void *data) {
 
 void Audio_deinit()
 {
-    Audio_deleteAudioRecorder();
-    Audio_deleteSLEngine();
+    Audio_releaseAll();
 }

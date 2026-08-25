@@ -16,11 +16,14 @@
  */
 #ifndef NATIVE_AUDIO_ANDROID_DEBUG_H_H
 #define NATIVE_AUDIO_ANDROID_DEBUG_H_H
+
+// Portable logging for the audio layer: uses logcat on Android, maps to
+// stderr on desktop builds (ALSA/SDL drivers and unit tests).
+#define MODULE_NAME "AUDIO-ECHO"
+
+#ifdef ANDROID
 #include <android/log.h>
 
-#if 1
-
-#define MODULE_NAME "AUDIO-ECHO"
 #define LOGV(...) \
   __android_log_print(ANDROID_LOG_VERBOSE, MODULE_NAME, __VA_ARGS__)
 #define LOGD(...) \
@@ -33,15 +36,39 @@
   __android_log_print(ANDROID_LOG_ERROR, MODULE_NAME, __VA_ARGS__)
 #define LOGF(...) \
   __android_log_print(ANDROID_LOG_FATAL, MODULE_NAME, __VA_ARGS__)
-
 #else
+#include <cstdio>
 
-#define LOGV(...)
-#define LOGD(...)
-#define LOGI(...)
-#define LOGW(...)
-#define LOGE(...)
-#define LOGF(...)
+#define LOGV(...) \
+  do { \
+    std::printf("V/" MODULE_NAME ": " __VA_ARGS__); \
+    std::printf("\n"); \
+  } while (0)
+#define LOGD(...) \
+  do { \
+    std::printf("D/" MODULE_NAME ": " __VA_ARGS__); \
+    std::printf("\n"); \
+  } while (0)
+#define LOGI(...) \
+  do { \
+    std::printf("I/" MODULE_NAME ": " __VA_ARGS__); \
+    std::printf("\n"); \
+  } while (0)
+#define LOGW(...) \
+  do { \
+    std::printf("W/" MODULE_NAME ": " __VA_ARGS__); \
+    std::printf("\n"); \
+  } while (0)
+#define LOGE(...) \
+  do { \
+    std::printf("E/" MODULE_NAME ": " __VA_ARGS__); \
+    std::printf("\n"); \
+  } while (0)
+#define LOGF(...) \
+  do { \
+    std::printf("F/" MODULE_NAME ": " __VA_ARGS__); \
+    std::printf("\n"); \
+  } while (0)
 #endif
 
 #endif  // NATIVE_AUDIO_ANDROID_DEBUG_H_H

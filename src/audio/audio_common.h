@@ -17,8 +17,19 @@
 #ifndef NATIVE_AUDIO_AUDIO_COMMON_H
 #define NATIVE_AUDIO_AUDIO_COMMON_H
 
+#ifdef ANDROID
+#include <SLES/OpenSLES.h>
+#include <SLES/OpenSLES_Android.h>
+#endif
+
+#include "android_debug.h"
 #include "debug_utils.h"
 #include "buf_manager.h"
+
+#ifdef ANDROID
+#include <sys/time.h>
+#include <cassert>
+#endif
 
 /*
  * Audio Sample Controls...
@@ -41,6 +52,26 @@ struct SampleFormat {
   uint32_t representation_;  // android extensions
 };
 
+#ifdef ANDROID
+extern void ConvertToSLSampleFormat(SLAndroidDataFormat_PCM_EX *pFormat, SampleFormat *format);
+
+/*
+ * GetSystemTicks(void):  return the time in micro sec
+ */
+__inline__ uint64_t GetSystemTicks()
+{
+    struct timeval Time;
+    gettimeofday(&Time, NULL);
+
+    return (static_cast<uint64_t>(1000000) * Time.tv_sec + Time.tv_usec);
+}
+
+#define SLASSERT(x)                   \
+  do {                                \
+    assert(SL_RESULT_SUCCESS == (x)); \
+    (void)(x);                        \
+  } while (0)
+#endif
 
 /*
  * Interface for player and recorder to communicate with engine
@@ -48,8 +79,8 @@ struct SampleFormat {
 #define ENGINE_SERVICE_MSG_KICKSTART_PLAYER 1
 #define ENGINE_SERVICE_MSG_RETRIEVE_DUMP_BUFS 2
 #define ENGINE_SERVICE_MSG_RECORDED_AUDIO_AVAILABLE 3
-typedef bool (*ENGINE_CALLBACK)(void* pCTX, uint32_t msg, void* pData);
-void SetRecorderCallback(ENGINE_CALLBACK callback);
+typedef bool (*ENGINE_CALLBACK)(void *pCTX, uint32_t msg, void *pData);
+
 /*
  * flag to enable file dumping
  */
