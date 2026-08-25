@@ -243,8 +243,15 @@ void format_timecode(long long frames, float sample_rate, char *out, size_t out_
 }
 
 #ifdef ANDROID
-// One-shot vibration from the processing thread (thread attach is handled
-// here; every step is null-guarded so a failure is silent).
+// One-shot vibration from the processing thread.
+//
+// Two rules make this JNI usage safe:
+//  1. VibrationEffect.createOneShot requires amplitude == DEFAULT_AMPLITUDE
+//     (-1) or 1..255; passing 0 makes the framework throw
+//     IllegalArgumentException.
+//  2. While a Java exception is pending, nearly every other JNI call is a
+//     CheckJNI fatal error (SIGABRT). So after every call that can throw we
+//     ExceptionCheck/ExceptionClear BEFORE doing anything else.
 void alarm_vibrate()
 {
     if (gAndroidApp == nullptr || gAndroidApp->activity == nullptr || gAndroidApp->activity->vm == nullptr)
@@ -260,42 +267,85 @@ void alarm_vibrate()
         attached = true;
     }
 
+    auto clear_exception = [&]()
+    {
+        if (env->ExceptionCheck())
+            env->ExceptionClear();
+    };
+
     auto finish = [&]()
     {
+        // Safe: ExceptionCheck/ExceptionClear are legal with a pending
+        // exception; everything else happens only after it is cleared.
+        clear_exception();
         if (attached)
             vm->DetachCurrentThread();
     };
 
+    // The processing thread must start the call with a clean VM state.
+    if (env->ExceptionCheck())
+    {
+        clear_exception();
+        return;
+    }
+
     jclass effectClass = env->FindClass("android/os/VibrationEffect");
-    if (effectClass == nullptr)
+    if (env->ExceptionCheck() || effectClass == nullptr)
     {
         finish();
         return;
     }
     const jmethodID createOneShot = env->GetStaticMethodID(effectClass, "createOneShot", "(JI)Landroid/os/VibrationEffect;");
-    if (createOneShot == nullptr)
+    if (env->ExceptionCheck() || createOneShot == nullptr)
     {
         finish();
         return;
     }
-    jobject effect = env->CallStaticObjectMethod(effectClass, createOneShot, (jlong)150, 0);
+
+    // amplitude must be DEFAULT_AMPLITUDE (-1) or 1..255.
+    jobject effect = env->CallStaticObjectMethod(effectClass, createOneShot, (jlong)150, -1);
+    if (env->ExceptionCheck() || effect == nullptr)
+    {
+        finish();
+        return;
+    }
 
     jobject context = gAndroidApp->activity->clazz;
     jclass contextClass = env->GetObjectClass(context);
+    if (env->ExceptionCheck() || contextClass == nullptr)
+    {
+        env->DeleteLocalRef(effect);
+        finish();
+        return;
+    }
     const jmethodID getSystemService = env->GetMethodID(contextClass, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    if (env->ExceptionCheck() || getSystemService == nullptr)
+    {
+        env->DeleteLocalRef(effect);
+        finish();
+        return;
+    }
     jstring vibratorService = env->NewStringUTF("vibrator");
     jobject service = env->CallObjectMethod(context, getSystemService, vibratorService);
     env->DeleteLocalRef(vibratorService);
-    if (service == nullptr)
+    if (env->ExceptionCheck() || service == nullptr)
     {
+        env->DeleteLocalRef(effect);
         finish();
         return;
     }
 
+    // Vibrator.vibrate(VibrationEffect) returns void since API 26.
     jclass serviceClass = env->GetObjectClass(service);
-    const jmethodID vibrate = env->GetMethodID(serviceClass, "vibrate", "(Landroid/os/VibrationEffect;)Z");
-    if (vibrate != nullptr)
-        env->CallBooleanMethod(service, vibrate, effect);
+    const jmethodID vibrate = env->GetMethodID(serviceClass, "vibrate", "(Landroid/os/VibrationEffect;)V");
+    if (env->ExceptionCheck() || vibrate == nullptr)
+    {
+        env->DeleteLocalRef(effect);
+        env->DeleteLocalRef(service);
+        finish();
+        return;
+    }
+    env->CallVoidMethod(service, vibrate, effect);
 
     env->DeleteLocalRef(effect);
     env->DeleteLocalRef(service);
