@@ -32,6 +32,8 @@ public:
     void end();
     void SetQueues(AudioQueue *pRecQueue, AudioQueue *pFreeQueue, int inputChannels);
     bool releaseUsedAudioChunks();
-    void releaseAllAudioChunks();
+    // Frames the consumer has advanced past since begin() (not counting the
+    // hop that is still buffered inside the processor).
+    int getConsumedFrames() const { return m_offsetFrames; }
     bool Process(Processor **pSpectra, int spectrumCount, int hopSamples, bool stereoDifferenceMode);
 };

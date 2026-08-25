@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdlib.h>
 
+#include <atomic>
 #include <cstring>
 #include <vector>
 
@@ -56,7 +57,13 @@ struct WaterfallState
     int texture_width = -1;
     int texture_height = -1;
     GLuint image_texture = 0xffffffff;
+    // image_storage is owned by the thread that updates rows (the processing
+    // thread after Init).  The UI thread only uploads from upload_storage,
+    // which the processing thread refreshes row by row - this removes the
+    // data race on the GL upload path.
     std::vector<uint16_t> image_storage;
+    std::vector<uint16_t> upload_storage;
+    std::atomic<bool> upload_pending{false};
     std::vector<uint16_t> row_scratch;
     bool texture_dirty = false;
 };
@@ -70,10 +77,18 @@ WaterfallState *get_waterfall(int channel)
     return &gWaterfalls[channel];
 }
 
+// UI thread.  All GL uploads read upload_storage only (the processing thread
+// never touches it from the GL side); image_storage is only read here when
+// upload_storage is still empty (first Init, done while the processing
+// thread is stopped).
 void ensure_texture(WaterfallState *state)
 {
     if (state == nullptr || state->texture_width <= 0 || state->texture_height <= 0)
         return;
+
+    const size_t expected = static_cast<size_t>(state->texture_width) * static_cast<size_t>(state->texture_height);
+    const std::vector<uint16_t> *upload_src =
+        state->upload_storage.size() == expected ? &state->upload_storage : &state->image_storage;
 
     if (state->image_texture == 0xffffffff)
     {
@@ -82,9 +97,10 @@ void ensure_texture(WaterfallState *state)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, state->texture_width, state->texture_height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, state->image_storage.data());
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, state->texture_width, state->texture_height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, upload_src->data());
         glBindTexture(GL_TEXTURE_2D, 0);
         state->texture_dirty = false;
+        state->upload_pending.store(false);
         return;
     }
 
@@ -92,9 +108,19 @@ void ensure_texture(WaterfallState *state)
     {
         glBindTexture(GL_TEXTURE_2D, state->image_texture);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, state->texture_width, state->texture_height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, state->image_storage.data());
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, state->texture_width, state->texture_height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, upload_src->data());
         glBindTexture(GL_TEXTURE_2D, 0);
         state->texture_dirty = false;
+        state->upload_pending.store(false);
+        return;
+    }
+
+    if (state->upload_pending.exchange(false) && upload_src == &state->upload_storage)
+    {
+        glBindTexture(GL_TEXTURE_2D, state->image_texture);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, state->texture_width, state->texture_height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, state->upload_storage.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
     }
 }
 }
@@ -130,8 +156,15 @@ void Init_waterfall(int channel, int16_t width, int16_t height)
             }
         }
 
-        state->texture_dirty = true;
+            state->texture_dirty = true;
     }
+
+    // Refresh the UI upload copy (Init is called with the app state lock
+    // held, so image_storage is not concurrently modified).
+    if (state->upload_storage.size() != state->image_storage.size())
+        state->upload_storage.resize(state->image_storage.size());
+    memcpy(state->upload_storage.data(), state->image_storage.data(), sizeof(uint16_t) * state->image_storage.size());
+    state->upload_pending.store(true);
 
     if (resized && state->image_texture != 0xffffffff)
     {
@@ -148,7 +181,9 @@ void Draw_update(int channel, float *pData, uint32_t size)
     if (state == nullptr || state->texture_width <= 0 || state->texture_height <= 0 || pData == nullptr || size == 0)
         return;
 
-    state->row_scratch.assign(static_cast<size_t>(state->texture_width), 0);
+    const size_t row_len = static_cast<size_t>(state->texture_width);
+    if (state->row_scratch.size() != row_len)
+        state->row_scratch.resize(row_len);
     for (int i = 0; i < state->texture_width; i++)
     {
         const uint32_t source_index = static_cast<uint32_t>((static_cast<uint64_t>(i) * size) / static_cast<uint32_t>(state->texture_width));
@@ -159,12 +194,17 @@ void Draw_update(int channel, float *pData, uint32_t size)
     if (state->texture_height > 1)
     {
         memmove(
-            &state->image_storage[static_cast<size_t>(state->texture_width)],
+            &state->image_storage[row_len],
             &state->image_storage[0],
-            sizeof(uint16_t) * static_cast<size_t>(state->texture_width) * static_cast<size_t>(state->texture_height - 1));
+            sizeof(uint16_t) * row_len * static_cast<size_t>(state->texture_height - 1));
     }
-    memcpy(&state->image_storage[0], state->row_scratch.data(), sizeof(uint16_t) * static_cast<size_t>(state->texture_width));
-    state->texture_dirty = true;
+    memcpy(&state->image_storage[0], state->row_scratch.data(), sizeof(uint16_t) * row_len);
+
+    // Publish a consistent snapshot for the UI thread's GL upload.
+    if (state->upload_storage.size() != state->image_storage.size())
+        state->upload_storage.resize(state->image_storage.size());
+    memcpy(state->upload_storage.data(), state->image_storage.data(), sizeof(uint16_t) * state->image_storage.size());
+    state->upload_pending.store(true);
 }
 
 void Draw_waterfall(int channel, ImRect frame_bb)
@@ -262,6 +302,50 @@ void Reset_waterfall_storage(int channel)
     if (state != nullptr && !state->image_storage.empty())
     {
         std::fill(state->image_storage.begin(), state->image_storage.end(), 0);
+        if (state->upload_storage.size() != state->image_storage.size())
+            state->upload_storage.resize(state->image_storage.size());
+        std::fill(state->upload_storage.begin(), state->upload_storage.end(), 0);
+        state->upload_pending.store(true);
         state->texture_dirty = true;
     }
+}
+
+void Waterfall_applyPendingUpload(int channel)
+{
+    WaterfallState *state = get_waterfall(channel);
+    if (state == nullptr || state->image_texture == 0xffffffff)
+        return;
+
+    const size_t expected = static_cast<size_t>(state->texture_width) * static_cast<size_t>(state->texture_height);
+    if (state->upload_pending.exchange(false) && state->upload_storage.size() == expected)
+    {
+        glBindTexture(GL_TEXTURE_2D, state->image_texture);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, state->texture_width, state->texture_height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, state->upload_storage.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}
+
+const std::vector<uint16_t> *Waterfall_imageData(int channel)
+{
+    WaterfallState *state = get_waterfall(channel);
+    if (state == nullptr)
+        return nullptr;
+    if (!state->upload_storage.empty())
+        return &state->upload_storage;
+    if (!state->image_storage.empty())
+        return &state->image_storage;
+    return nullptr;
+}
+
+int Waterfall_imageWidth(int channel)
+{
+    WaterfallState *state = get_waterfall(channel);
+    return state != nullptr ? state->texture_width : 0;
+}
+
+int Waterfall_imageHeight(int channel)
+{
+    WaterfallState *state = get_waterfall(channel);
+    return state != nullptr ? state->texture_height : 0;
 }

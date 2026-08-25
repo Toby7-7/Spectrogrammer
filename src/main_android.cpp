@@ -12,7 +12,6 @@
 #include "backends/imgui_impl_opengl3.h"
 #include <android/log.h>
 #include <android_native_app_glue.h>
-#include <android/asset_manager.h>
 #include <android/input.h>
 #include <android/window.h>
 #include <EGL/egl.h>
@@ -45,7 +44,6 @@ static void ShutdownWindow();
 static void Shutdown();
 static void MainLoopStep();
 static void AndroidDisplayKeyboard(int pShow);
-static int GetAssetData(const char* filename, void** out_data);
 static void keep_screen_on();
 static bool HasRecordAudioPermission();
 static void RequestRecordAudioPermission();
@@ -367,15 +365,24 @@ void Shutdown()
 #define JAVA_CALL_DETACH       	jnii->DetachCurrentThread( jniiptr );
 #endif
 
+// ANativeActivity_setWindowFlags is a JNI round-trip; only call it when the
+// desired state actually changes.
+static int g_ScreenOnState = -1;
+
 void keep_screen_on() 
 {
     if (g_App == nullptr || g_App->activity == nullptr)
         return;
 
+    const int wanted = Spectrogrammer_ShouldStayAwake() ? 1 : 0;
+    if (wanted == g_ScreenOnState)
+        return;
+    g_ScreenOnState = wanted;
+
     ANativeActivity_setWindowFlags(
         g_App->activity,
-        Spectrogrammer_ShouldStayAwake() ? AWINDOW_FLAG_KEEP_SCREEN_ON : 0,
-        Spectrogrammer_ShouldStayAwake() ? 0 : AWINDOW_FLAG_KEEP_SCREEN_ON);
+        wanted ? AWINDOW_FLAG_KEEP_SCREEN_ON : 0,
+        wanted ? 0 : AWINDOW_FLAG_KEEP_SCREEN_ON);
 }
 
 void AndroidDisplayKeyboard(int pShow)
@@ -643,6 +650,46 @@ static const ImWchar* BuildUiGlyphRanges()
         "记录当前曲线",
         "清除基线",
         "关闭",
+        "文件",
+        "完成",
+        "固定",
+        "已暂停",
+        "打开音频文件",
+        "选择 WAV 文件（应用外部文件目录）",
+        "未找到文件",
+        "加载",
+        "取消",
+        "无法打开文件",
+        "播放完成，点关闭返回实时采集",
+        "输入",
+        "单声道",
+        "双声道",
+        "双声道回退",
+        "电平",
+        "游标",
+        "阈值报警",
+        "启用报警",
+        "阈值",
+        "频率范围下限",
+        "频率范围上限",
+        "奈奎斯特",
+        "触发时振动",
+        "时间平均频谱",
+        "帧平均",
+        "冻结瀑布图",
+        "频谱继续更新",
+        "瀑布图配色",
+        "岩浆",
+        "热冷",
+        "灰度",
+        "显示基线差值曲线",
+        "保存图片为",
+        "已导出到外部文件目录",
+        "报警",
+        "返回",
+        "采集",
+        "暂停",
+        "固定",
     };
 
     for (const char* text : kUiTexts)
@@ -770,18 +817,3 @@ static void MoveTaskToBack()
 }
 
 
-// Helper to retrieve data placed into the assets/ directory (android/app/src/main/assets)
-static int GetAssetData(const char* filename, void** outData)
-{
-    int num_bytes = 0;
-    AAsset* asset_descriptor = AAssetManager_open(g_App->activity->assetManager, filename, AASSET_MODE_BUFFER);
-    if (asset_descriptor)
-    {
-        num_bytes = AAsset_getLength(asset_descriptor);
-        *outData = IM_ALLOC(num_bytes);
-        int64_t num_bytes_read = AAsset_read(asset_descriptor, *outData, num_bytes);
-        AAsset_close(asset_descriptor);
-        IM_ASSERT(num_bytes_read == num_bytes);
-    }
-    return num_bytes;
-}
