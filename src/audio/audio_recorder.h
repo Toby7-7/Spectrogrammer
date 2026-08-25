@@ -17,9 +17,10 @@
 #ifndef NATIVE_AUDIO_AUDIO_RECORDER_H
 #define NATIVE_AUDIO_AUDIO_RECORDER_H
 #include <sys/types.h>
+#include <atomic>
+#include <thread>
 #include <SLES/OpenSLES.h>
 #include <SLES/OpenSLES_Android.h>
-#include "audio_SLES.h"
 #include "audio_common.h"
 #include "buf_manager.h"
 #include "debug_utils.h"
@@ -37,6 +38,18 @@ class AudioRecorder {
 
   ENGINE_CALLBACK callback_;
   void *ctx_;
+
+  // Pump thread: the single owner of Enqueue()/SetRecordState().  The SLES
+  // callback only moves one full buffer from the device shadow queue into the
+  // application queue; re-arming the device never happens on the callback
+  // thread (the old design could wedge the recorder in SL_RECORDSTATE_STOPPED
+  // and stay silent forever).
+  std::atomic<bool> m_pumpRunning{false};
+  std::atomic<bool> m_recordingDesired{false};
+  std::thread m_pumpThread;
+  void pumpLoop();
+  void startPump();
+  void stopPump();
 
  public:
   explicit AudioRecorder(SampleFormat *, SLEngineItf engineEngine, SLuint32 recordingPreset);

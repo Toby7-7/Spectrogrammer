@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 
 #include "debug_utils.h"
+#include <sys/time.h>
 #include "android_debug.h"
 #include <inttypes.h>
 

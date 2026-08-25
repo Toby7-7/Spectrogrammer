@@ -6,6 +6,14 @@
 #include "FilePicker.h"
 #include "SpectrumFile.h"
 
+static bool BuildPath(char *out, size_t out_size, const char *dir, const char *name)
+{
+    if (out == nullptr || dir == nullptr || name == nullptr || out_size == 0)
+        return false;
+    const int n = snprintf(out, out_size, "%s/%s", dir, name);
+    return n > 0 && (size_t)n < out_size;
+}
+
 static linked_list *pList = NULL;
 static const char *pSelectedFilename = NULL;
 
@@ -37,11 +45,8 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
                 pSelectedFilename = pTmp->pStr;
 
                 char filename[1024];
-                strcpy(filename, pWorkingDirectory);
-                strcat(filename, "/");
-                strcat(filename, pTmp->pStr);
-
-                res = LoadSpectrum(filename, pBuffer, sample_rate, fft_size);
+                if (BuildPath(filename, sizeof(filename), pWorkingDirectory, pTmp->pStr))
+                    res = LoadSpectrum(filename, pBuffer, sample_rate, fft_size);
             }
 
             pTmp = pTmp->pNext;
@@ -66,12 +71,11 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
         timer = time(NULL);
         tm_info = localtime(&timer);
 
+        char base_name[64];
+        strftime(base_name, sizeof(base_name), "%Y%m%d-%H%M%S_data.spec", tm_info);
         char filename[1024];
-        strcpy(filename, pWorkingDirectory);
-        strcat(filename, "/");
-        strftime(&filename[strlen(filename)], 1024, "%Y%m%d-%H%M%S_data.spec", tm_info);
-
-        res = SaveSpectrum(filename, pBuffer, *sample_rate, *fft_size);
+        if (BuildPath(filename, sizeof(filename), pWorkingDirectory, base_name))
+            res = SaveSpectrum(filename, pBuffer, *sample_rate, *fft_size);
 
         RefreshFiles(pWorkingDirectory);
     }
@@ -91,7 +95,7 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
     if (ImGui::Button("Rename"))
     {
         ImGui::OpenPopup("Rename");
-        strcpy(newFilename, pSelectedFilename);
+        snprintf(newFilename, sizeof(newFilename), "%s", pSelectedFilename);
     }
 
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
@@ -105,16 +109,12 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
         { 
             char oldFilename[1024];
             char renamedFilename[1024];
-            strcpy(oldFilename, pWorkingDirectory);
-            strcat(oldFilename, "/");
-            strcat(oldFilename, pSelectedFilename);
-
-            strcpy(renamedFilename, pWorkingDirectory);
-            strcat(renamedFilename, "/");
-            strcat(renamedFilename, newFilename);
-
-            rename(oldFilename, renamedFilename);
-            RefreshFiles(pWorkingDirectory);
+            if (BuildPath(oldFilename, sizeof(oldFilename), pWorkingDirectory, pSelectedFilename) &&
+                BuildPath(renamedFilename, sizeof(renamedFilename), pWorkingDirectory, newFilename))
+            {
+                if (rename(oldFilename, renamedFilename) == 0)
+                    RefreshFiles(pWorkingDirectory);
+            }
             ImGui::CloseCurrentPopup(); 
         }
         ImGui::SetItemDefaultFocus();
@@ -138,12 +138,11 @@ bool HoldPicker(const char *pWorkingDirectory, bool bCanSave, BufferIODouble *pB
         if (ImGui::Button("OK", ImVec2(120, 0))) 
         { 
             char filename[1024];
-            strcpy(filename, pWorkingDirectory);
-            strcat(filename, "/");
-            strcat(filename, pSelectedFilename);                    
-            remove(filename);
-
-            RefreshFiles(pWorkingDirectory);
+            if (BuildPath(filename, sizeof(filename), pWorkingDirectory, pSelectedFilename))
+            {
+                if (remove(filename) == 0)
+                    RefreshFiles(pWorkingDirectory);
+            }
 
             ImGui::CloseCurrentPopup(); 
         }

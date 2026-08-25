@@ -49,43 +49,6 @@ void get_max_min(float *pData, int stride, int values_count, float *scale_max, f
     }
 }
 
-void draw_lines_fit(ImRect frame_bb, float *pData, int values_count)
-{
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-
-    ImGui::PushClipRect(frame_bb.Min, frame_bb.Max, true);
-
-    float scale_max_x = FLT_MAX, scale_min_x = FLT_MAX;
-    float scale_max_y = FLT_MAX, scale_min_y = FLT_MAX;
-    get_max_min(&pData[0], 2, values_count, &scale_max_x, &scale_min_x);
-    get_max_min(&pData[1], 2, values_count, &scale_max_y, &scale_min_y);
-
-    const float inv_scale_y = (scale_min_y == scale_max_y) ? 0.0f : (1.0f / (scale_max_y - scale_min_y));
-    const float inv_scale_x = (scale_min_x == scale_max_x) ? 0.0f : (1.0f / (scale_max_x - scale_min_x));
-    
-    ImU32 col = IM_COL32(200, 200, 200, 200);
-    
-    ImVec2 tp0 = ImVec2( 
-        0.0f, 
-        1.0f - ImSaturate((pData[2*0+1] - scale_min_y) * inv_scale_y) 
-    );
-    ImVec2 pos0 = ImLerp(frame_bb.Min, frame_bb.Max, tp0);
-    for (int i = 1; i < values_count; i++)
-    {
-        const ImVec2 tp1 = ImVec2( 
-            0.0f + ImSaturate((pData[2*i+0] - scale_min_x) * inv_scale_x) , 
-            1.0f - ImSaturate((pData[2*i+1] - scale_min_y) * inv_scale_y) 
-        );
-        ImVec2 pos1 = ImLerp(frame_bb.Min, frame_bb.Max, tp1);
-        window->DrawList->AddLine(pos0, pos1, col);
-        pos0 = pos1;
-        if (tp1.x>1.0f)
-            break;
-    }    
-
-    ImGui::PopClipRect();
-}
-
 static float lerp( float min, float max, float t )
 {
     return min*(1.0-t) + max*t;

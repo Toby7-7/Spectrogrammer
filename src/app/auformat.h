@@ -8,4 +8,3 @@
 
 
 double Uint16ToFloat(const AU_FORMAT *v);
-AU_FORMAT FloatToUint16(float v);
