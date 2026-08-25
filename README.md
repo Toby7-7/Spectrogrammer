@@ -19,24 +19,13 @@ Chinese documentation:
 - Pinch zoom and horizontal pan for close inspection of specific frequency ranges
 - Adjustable overlay text size and opacity
 - Background capture, keep-screen-on support, Android back handling, and foreground-service persistence
-- **Audio file analysis**: tap `File` to pick a WAV file from the app external files directory (`/sdcard/Android/data/<package>/files`, reachable from file managers and `adb`) and analyze it with the same pipeline as live capture — spectrum, waterfall, peak hold, markers, cursor, pinch zoom, channel modes, plus a seek bar, pause/resume, and progress display
-- **Level meter**: live input level in dBFS shown in the status line
-- **Threshold alarm**: alarm on spectral peaks above a configurable dBFS threshold within a frequency range, with optional vibration and hysteresis
-- **Time-averaged spectrum**: optional 16/32/64-frame exponential averaging for a steadier trace
-- **Waterfall color maps**: `Magma`, `Hot/cold`, and `Grayscale`
-- **Waterfall freeze**: keep the waterfall image while the spectrum keeps updating
-- **Baseline difference curve**: subtract a saved reference (baseline) curve from the current spectrum, centered at 0 dB with a ±60 dB window
-- **Cursor pinning**: lock the cursor frequency so zooming/panning does not lose it
-- **PNG export**: save the waterfall (per channel) and spectrum to PNG files in the external files directory from the `Compare` menu
-- **Compare menu** in settings: save/clear the baseline, load saved traces, and export images
 
 ## Quick Start
 1. Install the APK and grant microphone permission.
-2. The five top buttons are `File`, `Pause/Resume`, `Clear Peaks`, the cursor control (`Pin` / `Clear Cursor`), and `Settings`.
-3. Tap `File` to open a local WAV file for offline analysis; the file bar shows playback position, a seek slider, and the file sample rate.
-4. Tap or drag on the spectrum or waterfall to move the manual cursor and inspect the current frequency and dB level.
-5. Use a two-finger gesture to zoom or pan horizontally.
-6. Open `Settings` to access the categorized pages: `Audio Input`, `Analysis`, `Spectrum & Waterfall`, `Compare`, `System`, and `About`.
+2. The four top buttons are `Pause/Resume`, `Clear Peaks`, `Clear Cursor`, and `Settings`.
+3. Tap or drag on the spectrum or waterfall to move the manual cursor and inspect the current frequency and dB level.
+4. Use a two-finger gesture to zoom or pan horizontally.
+5. Open `Settings` to access the categorized pages: `Audio Input`, `Analysis`, `Spectrum & Waterfall`, `System`, and `About`.
 
 ## Settings Overview
 
@@ -52,8 +41,6 @@ Chinese documentation:
 - `Decimation stages`: Downsample before FFT for finer low-frequency resolution while reducing the visible upper frequency limit
 - `Window function`: `Rectangular`, `Hann`, `Hamming`, or `Blackman-Harris`
 - `Exponential smoothing`: Larger values produce a steadier trace
-- `Time-averaged spectrum`: `Off` or `16 / 32 / 64`-frame exponential average
-- `Threshold alarm`: enable an alarm with a dBFS `Threshold`, a frequency range (0 = DC / Nyquist), and optional vibration when triggered
 
 ### Spectrum & Waterfall
 - `Frequency axis scale`: Switch among `Linear`, `Logarithmic`, `Music log`, `Mel`, `Bark`, and `ERB`
@@ -65,17 +52,8 @@ Chinese documentation:
 - `Peak marker source`: Choose `Live` or `Short hold`
 - `Show upper spectrum`: Disable to show only the waterfall
 - `Show waterfall`: Disable to show only the upper spectrum
-- `Freeze waterfall`: Stop the waterfall scrolling while the spectrum keeps updating
-- `Waterfall color map`: `Magma`, `Hot/cold`, or `Grayscale`
-- `Show baseline difference curve`: Overlay `(current - baseline)` in dB, 0 dB centered, ±60 dB full scale
 - `Waterfall height`: Set how much of the screen the waterfall occupies
 - `Scroll speed`: Waterfall row interval, adjustable from `2 ms` to `250 ms`
-
-### Compare
-- `Save current curve as baseline`: Capture the current spectrum as the reference used by the difference curve
-- `Clear baseline`: Remove the saved reference
-- `Load saved trace`: Open a previously saved spectrum file from the app folder
-- `Save image as PNG`: Export the spectrum and each visible waterfall to PNG files in the external files directory
 
 ### System
 - `Language`: `English` or `简体中文`
@@ -132,12 +110,6 @@ Notes:
 make BUILD_ANDROID=n
 ```
 
-### Unit tests (host)
-```bash
-make test
-```
-Runs `tests/run_tests.cpp` on the dev machine (Linux/macOS). Covers config save/load and v11→v12 migration, config validation, color maps, the PNG writer (structure, CRCs, pixel round-trip), the FIR anti-alias decimator, the WAV file feeder, and the WAV file picker. Requires the host C/C++ toolchain and zlib development headers (e.g. `zlib1g-dev` / `brew install zlib`).
-
 ## Repository Layout
 - `src/app`: spectrum UI, axes, waterfall, configuration, and FFT-related logic
 - `src/audio`: audio capture and platform audio backends
@@ -148,30 +120,7 @@ Runs `tests/run_tests.cpp` on the dev machine (Linux/macOS). Covers config save/
 ## Notes
 - High sample rates and the `Unprocessed` audio source depend entirely on device and driver support.
 - When a fixed sample rate is not supported, the app falls back to a lower working rate when possible.
-- The alarm vibration uses the `VIBRATE` permission (normal permission, declared in the manifest).
-- File analysis reads WAV files (16-bit PCM or 32-bit IEEE float, mono or stereo) from the app's external files directory; other formats are not supported.
 - The repository currently prioritizes Android phone usability; Linux support remains available but is not the main optimization target.
-
-## Recent Changes (this fork revision)
-**New features**
-- Audio file (WAV) analysis with the same feature set as live capture: spectrum, waterfall, peak hold, peak markers, cursor, pinch zoom/pan, channel modes, plus seek, pause/resume, and playback progress
-- Input level meter (dBFS) in the status line
-- Threshold alarm with frequency range, dBFS threshold, hysteresis, and optional vibration
-- Time-averaged spectrum (16/32/64 frames)
-- Waterfall color map selection (Magma / Hot-cold / Grayscale), waterfall freeze, and baseline difference curve
-- Cursor pinning; PNG export of spectrum and waterfalls; Compare menu (baseline save/clear, trace load)
-
-**Bug fixes**
-- Recorder stall: the OpenSL ES capture pump is now driven by its own thread, so the analysis loop can no longer wedge the capture; a watchdog restarts a wedged session automatically
-- Decimation aliasing: decimating now applies a windowed-sinc FIR anti-alias low-pass before downsampling, so out-of-band content no longer folds into the displayed spectrum
-- Waterfall texture uploads are staged through a CPU copy and applied on the GL/UI thread, removing a cross-thread `glTexImage2D` race
-- Config file: validated on load (clamped/enum-checked), saved atomically (tmp + rename), and migrated from v11 to v12
-- Spectrum file load validates header fields and buffer sizes before use; save checks write results
-- Hold-picker paths are built with length-checked `snprintf` instead of `strcpy`/concatenation
-- `GetColorMap` no longer indexes out of bounds for unknown map ids; grayscale map is generated instead of a zero array
-- Dead code removed (`audio_SLES.h` split into `audio_common.h`, `pass_through.h`, `BufferAverage.h`, `ModalSampleRate.*`, `draw_lines_fit`, `FloatToUint16`)
-- Per-frame (not per-burst) lock scoping in the processing loop reduces UI-thread contention
-- `keep_screen_on` JNI call is cached and only issued on state change
 
 ## Licensing and Provenance
 - This repository is a fork and derivative of `aguaviva/Spectrogrammer`, and it still contains inherited or adapted upstream code.

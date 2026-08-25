@@ -532,39 +532,12 @@ static uint16_t _hotcold_data[256]  = {
 
 uint16_t *pData = _magma_data;
 
-static uint16_t _gray_data[256];
-static bool _gray_data_ready = false;
-
-// Supported color maps: 0 = magma, 1 = hot/cold, 2 = grayscale.
-int GetColorMapCount()
-{
-    return 3;
-}
-
-static void init_gray_data()
-{
-    if (_gray_data_ready)
-        return;
-    for (int i = 0; i < 256; i++)
-        _gray_data[i] = TO16BITS(i, i, i);
-    _gray_data_ready = true;
-}
-
 void SetColorMap(int i)
 {
-    if (i < 0)
-        i = 0;
-    if (i >= GetColorMapCount())
-        i = 0;
-    if (i == 0)
+    if (i==0)
         pData = _magma_data;
-    else if (i == 1)
-        pData = _hotcold_data;
     else
-    {
-        init_gray_data();
-        pData = _gray_data;
-    }
+        pData = _hotcold_data;
 }
 
 uint16_t GetColorMap(int i)

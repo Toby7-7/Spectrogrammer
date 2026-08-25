@@ -54,6 +54,20 @@ void ChunkerProcessor::SetQueues(AudioQueue *pRecQueue, AudioQueue *pFreeQueue, 
     m_inputChannels = inputChannels <= 1 ? 1 : inputChannels;
 }
 
+void ChunkerProcessor::releaseAllAudioChunks()
+{
+    sample_buf *front = nullptr;
+    while (m_pRecQueue != nullptr && m_pRecQueue->front(&front))
+    {
+        m_pRecQueue->pop();
+        m_pFreeQueue->push(front);
+    }
+    m_offsetFrames = 0;
+    m_srcOffsetFrames = 0;
+    m_destOffsetFrames = 0;
+    m_bufferIndex = 0;
+}
+
 bool ChunkerProcessor::PrepareBuffer(Processor **pSpectra, int spectrumCount, bool stereoDifferenceMode)
 {
     assert(pSpectra != NULL);

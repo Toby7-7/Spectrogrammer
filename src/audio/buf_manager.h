@@ -21,7 +21,6 @@
 #include <cassert>
 #include <memory>
 #include <limits>
-#include <cstring>
 
 #ifndef CACHE_ALIGN
 #define CACHE_ALIGN 64

@@ -10,7 +10,7 @@
 
 namespace
 {
-constexpr int kConfigVersion = 12;
+constexpr int kConfigVersion = 11;
 
 void migrate_config(AppConfig *config)
 {
@@ -93,20 +93,6 @@ void migrate_config(AppConfig *config)
     if (config->version < 11)
     {
         config->ui_language = UiLanguage::English;
-        config->version = 11;
-    }
-
-    if (config->version < 12)
-    {
-        config->color_map = 0;
-        config->waterfall_freeze = false;
-        config->average_frames = 0;
-        config->alarm_enabled = false;
-        config->alarm_threshold_db = -60.0f;
-        config->alarm_freq_min_hz = 0.0f;
-        config->alarm_freq_max_hz = 0.0f;
-        config->alarm_vibrate = true;
-        config->baseline_diff_enabled = false;
         config->version = kConfigVersion;
     }
 }
@@ -168,15 +154,6 @@ AppConfig MakeDefaultAppConfig()
     config.background_capture_enabled = true;
     config.show_spectrum = true;
     config.show_waterfall = true;
-    config.color_map = 0;
-    config.waterfall_freeze = false;
-    config.average_frames = 0;
-    config.alarm_enabled = false;
-    config.alarm_threshold_db = -60.0f;
-    config.alarm_freq_min_hz = 0.0f;
-    config.alarm_freq_max_hz = 0.0f;
-    config.alarm_vibrate = true;
-    config.baseline_diff_enabled = false;
     return config;
 }
 
@@ -250,31 +227,11 @@ bool LoadAppConfig(const char *path, AppConfig *config)
             loaded.show_spectrum = parse_bool(value);
         else if (strcmp(key, "show_waterfall") == 0)
             loaded.show_waterfall = parse_bool(value);
-        else if (strcmp(key, "color_map") == 0)
-            loaded.color_map = atoi(value);
-        else if (strcmp(key, "waterfall_freeze") == 0)
-            loaded.waterfall_freeze = parse_bool(value);
-        else if (strcmp(key, "average_frames") == 0)
-            loaded.average_frames = atoi(value);
-        else if (strcmp(key, "alarm_enabled") == 0)
-            loaded.alarm_enabled = parse_bool(value);
-        else if (strcmp(key, "alarm_threshold_db") == 0)
-            loaded.alarm_threshold_db = strtof(value, nullptr);
-        else if (strcmp(key, "alarm_freq_min_hz") == 0)
-            loaded.alarm_freq_min_hz = strtof(value, nullptr);
-        else if (strcmp(key, "alarm_freq_max_hz") == 0)
-            loaded.alarm_freq_max_hz = strtof(value, nullptr);
-        else if (strcmp(key, "alarm_vibrate") == 0)
-            loaded.alarm_vibrate = parse_bool(value);
-        else if (strcmp(key, "baseline_diff_enabled") == 0)
-            loaded.baseline_diff_enabled = parse_bool(value);
     }
 
     fclose(file);
 
-    // Accept configs written by newer builds (version > kConfigVersion):
-    // unknown keys are ignored, known keys keep their parsed values.
-    if (loaded.version <= 0)
+    if (loaded.version <= 0 || loaded.version > kConfigVersion)
         return false;
 
     migrate_config(&loaded);
@@ -282,36 +239,19 @@ bool LoadAppConfig(const char *path, AppConfig *config)
     if ((int)loaded.ui_language < (int)UiLanguage::English ||
         (int)loaded.ui_language > (int)UiLanguage::ChineseSimplified)
         loaded.ui_language = UiLanguage::English;
-    if ((int)loaded.audio_source_mode < (int)AudioSourceMode::Default ||
-        (int)loaded.audio_source_mode > (int)AudioSourceMode::Unprocessed)
-        loaded.audio_source_mode = AudioSourceMode::Default;
-    if ((int)loaded.sampling_rate_mode < (int)SamplingRateMode::Auto ||
-        (int)loaded.sampling_rate_mode > (int)SamplingRateMode::Fixed)
-        loaded.sampling_rate_mode = SamplingRateMode::Auto;
-    if ((int)loaded.window_function < (int)WindowFunctionType::Rectangular ||
-        (int)loaded.window_function > (int)WindowFunctionType::BlackmanHarris)
-        loaded.window_function = WindowFunctionType::BlackmanHarris;
-    if ((int)loaded.frequency_axis_scale < (int)FrequencyAxisScale::Logarithmic ||
-        (int)loaded.frequency_axis_scale > (int)FrequencyAxisScale::ERB)
-        loaded.frequency_axis_scale = FrequencyAxisScale::Logarithmic;
-    if ((int)loaded.trace_mode < (int)TraceMode::Live ||
-        (int)loaded.trace_mode > (int)TraceMode::PeakHoldOnly)
-        loaded.trace_mode = TraceMode::LiveAndPeakHold;
     if (loaded.sample_rate_hz <= 0)
         loaded.sample_rate_hz = 48000;
     if ((int)loaded.input_channel_mode < (int)InputChannelMode::Mono ||
         (int)loaded.input_channel_mode > (int)InputChannelMode::StereoDifference)
         loaded.input_channel_mode = InputChannelMode::StereoIndependent;
-    if (loaded.sample_rate_hz > 384000)
-        loaded.sample_rate_hz = 384000;
+    if (loaded.sample_rate_hz > 192000)
+        loaded.sample_rate_hz = 192000;
     if (loaded.input_gain_db < -24.0f)
         loaded.input_gain_db = -24.0f;
     if (loaded.input_gain_db > 24.0f)
         loaded.input_gain_db = 24.0f;
     if (loaded.fft_size < 128)
         loaded.fft_size = 1024;
-    if (loaded.fft_size > 8192)
-        loaded.fft_size = 8192;
     if (loaded.decimations < 0)
         loaded.decimations = 0;
     if (loaded.decimations > 5)
@@ -348,26 +288,6 @@ bool LoadAppConfig(const char *path, AppConfig *config)
         loaded.peak_marker_source_mode = PeakMarkerSourceMode::Live;
     if (!loaded.show_spectrum && !loaded.show_waterfall)
         loaded.show_spectrum = true;
-    if (loaded.color_map < 0 || loaded.color_map > 2)
-        loaded.color_map = 0;
-    if (loaded.average_frames < 0)
-        loaded.average_frames = 0;
-    if (loaded.average_frames > 0 && loaded.average_frames < 16)
-        loaded.average_frames = 16;
-    if (loaded.average_frames > 64)
-        loaded.average_frames = 64;
-    if (loaded.alarm_threshold_db < -100.0f)
-        loaded.alarm_threshold_db = -100.0f;
-    if (loaded.alarm_threshold_db > -20.0f)
-        loaded.alarm_threshold_db = -20.0f;
-    if (loaded.alarm_freq_min_hz < 0.0f)
-        loaded.alarm_freq_min_hz = 0.0f;
-    if (loaded.alarm_freq_max_hz < 0.0f)
-        loaded.alarm_freq_max_hz = 0.0f;
-    if (loaded.alarm_freq_min_hz > 192000.0f)
-        loaded.alarm_freq_min_hz = 192000.0f;
-    if (loaded.alarm_freq_max_hz > 192000.0f)
-        loaded.alarm_freq_max_hz = 192000.0f;
     *config = loaded;
     return true;
 }
@@ -377,14 +297,7 @@ bool SaveAppConfig(const char *path, const AppConfig &config)
     if (path == nullptr)
         return false;
 
-    // Write to a temporary file and rename into place so a crash mid-write
-    // can never leave a truncated config behind.
-    char tmp_path[512];
-    const int tmp_len = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
-    if (tmp_len < 0 || (size_t)tmp_len >= sizeof(tmp_path))
-        return false;
-
-    FILE *file = fopen(tmp_path, "wb");
+    FILE *file = fopen(path, "wb");
     if (file == nullptr)
         return false;
 
@@ -414,24 +327,9 @@ bool SaveAppConfig(const char *path, const AppConfig &config)
     fprintf(file, "background_capture_enabled=%d\n", config.background_capture_enabled ? 1 : 0);
     fprintf(file, "show_spectrum=%d\n", config.show_spectrum ? 1 : 0);
     fprintf(file, "show_waterfall=%d\n", config.show_waterfall ? 1 : 0);
-    fprintf(file, "color_map=%d\n", config.color_map);
-    fprintf(file, "waterfall_freeze=%d\n", config.waterfall_freeze ? 1 : 0);
-    fprintf(file, "average_frames=%d\n", config.average_frames);
-    fprintf(file, "alarm_enabled=%d\n", config.alarm_enabled ? 1 : 0);
-    fprintf(file, "alarm_threshold_db=%.6f\n", config.alarm_threshold_db);
-    fprintf(file, "alarm_freq_min_hz=%.6f\n", config.alarm_freq_min_hz);
-    fprintf(file, "alarm_freq_max_hz=%.6f\n", config.alarm_freq_max_hz);
-    fprintf(file, "alarm_vibrate=%d\n", config.alarm_vibrate ? 1 : 0);
-    fprintf(file, "baseline_diff_enabled=%d\n", config.baseline_diff_enabled ? 1 : 0);
 
-    const bool flush_ok = fflush(file) == 0;
-    const int close_result = fclose(file);
-    if (!flush_ok || close_result != 0)
-    {
-        remove(tmp_path);
-        return false;
-    }
-    return rename(tmp_path, path) == 0;
+    fclose(file);
+    return true;
 }
 
 int GetDecimationFactor(const AppConfig &config)

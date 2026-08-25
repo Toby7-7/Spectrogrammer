@@ -18,9 +18,6 @@ public:
     virtual void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length, int inputStride) = 0;
     virtual void convertFloatToFFT(const float *input, int offsetDest, int length) = 0;
     virtual void computePower(float decay) = 0;
-    // Peak/total bin power of the last computePower() call, full-scale units.
-    virtual float getLastPeakPower() const { return 0.0f; }
-    virtual float getLastTotalPower() const { return 0.0f; }
     virtual float bin2Freq(int bin) const = 0;
     virtual float freq2Bin(float freq) const = 0;
 
