@@ -13,12 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <cstdarg>
 #include <cstdio>
 #include <sys/stat.h>
 
 #include "debug_utils.h"
-#include <sys/time.h>
 #include "android_debug.h"
 #include <inttypes.h>
 

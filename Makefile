@@ -28,14 +28,12 @@ PACKAGENAME?=org.nanoorg.$(APPNAME)
 SRC=$(SRC_DIR)/main_android.cpp $(SRC_DIR)/android_native_app_glue.c
 SRC+=$(SRC_DIR)/audio/audio_main.cpp
 SRC+=$(SRC_DIR)/audio/audio_recorder.cpp
-SRC+=$(SRC_DIR)/audio/file_source.cpp
 SRC+=$(SRC_DIR)/audio/debug_utils.cpp
 else
 SRC=$(SRC_DIR)/main_linux.cpp
 #SRC+=$(SRC_DIR)/audio/audio_driver_sdl.cpp
 CFLAGS+= -DALSA_DRIVER
 SRC+=$(SRC_DIR)/audio/audio_driver_alsa.cpp
-SRC+=$(SRC_DIR)/audio/file_source.cpp
 endif
 
 # Add app source files
@@ -116,7 +114,7 @@ CFLAGS+= -I$(SRC_DIR) -I$(SRC_DIR)/app -I$(SRC_DIR)/audio
 CFLAGS+= -Isubmodules/kissfft -Isubmodules/imgui
 
 ifeq ($(BUILD_ANDROID),y)
-LDFLAGS += -landroid -lGLESv3 -lEGL  -llog -lOpenSLES -lz
+LDFLAGS += -landroid -lGLESv3 -lEGL  -llog -lOpenSLES 
 LDFLAGS += -shared -uANativeActivity_onCreate
 endif
 
@@ -145,7 +143,6 @@ endif
 ifeq ($(ARCH),x86_64)
 LDFLAGS += -lGL `pkg-config --static --libs glfw3` 
 LDFLAGS += -lX11 -lpthread -lXinerama -lXext -lGL -lm -ldl -lstdc++
-LDFLAGS += -lz
 LDFLAGS += -lasound
 #LDFLAGS += -lSDL2
 LDFLAGS += `pkg-config --libs $(KISSFFT_PKGCONFIG)`
@@ -222,28 +219,6 @@ doctor-android:
 		echo "note: adb not found; required only for make push, make run, and make logcat"; \
 	fi; \
 	exit $$status
-
-# Host-side unit tests (dev machine; Linux/macOS). Not part of the APK build.
-HOST_CC ?= cc
-HOST_CXX ?= c++
-HOST_TEST_DIR := build/host-tests
-test:
-	mkdir -p $(HOST_TEST_DIR)
-	$(HOST_CC) -O1 -c submodules/kissfft/kiss_fft.c -o $(HOST_TEST_DIR)/kiss_fft.o
-	$(HOST_CC) -O1 -Isubmodules/kissfft -c submodules/kissfft/kiss_fftr.c -o $(HOST_TEST_DIR)/kiss_fftr.o
-	$(HOST_CXX) -std=gnu++14 -O1 -g -Isrc -Isrc/app -Isrc/audio -Isubmodules/kissfft \
-		tests/run_tests.cpp \
-		src/app/AppConfig.cpp \
-		src/app/auformat.cpp \
-		src/app/colormaps.cpp \
-		src/app/fft.cpp \
-		src/app/FilePicker.cpp \
-		src/app/image_export.cpp \
-		src/audio/file_source.cpp \
-		$(HOST_TEST_DIR)/kiss_fft.o \
-		$(HOST_TEST_DIR)/kiss_fftr.o \
-		-lz -lpthread -o $(HOST_TEST_DIR)/run_tests
-	$(HOST_TEST_DIR)/run_tests
 
 testsdk: doctor-android
 

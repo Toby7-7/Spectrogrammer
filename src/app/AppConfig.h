@@ -105,21 +105,6 @@ struct AppConfig
     bool background_capture_enabled;
     bool show_spectrum;
     bool show_waterfall;
-    // Waterfall color map: 0 = magma, 1 = hot/cold, 2 = grayscale.
-    int color_map;
-    // Stop scrolling the waterfall (spectrum keeps updating).
-    bool waterfall_freeze;
-    // Time-averaged spectrum: 0 = off, else number of averaged frames
-    // (16/32/64).
-    int average_frames;
-    // Threshold alarm on the analyzed spectrum.
-    bool alarm_enabled;
-    float alarm_threshold_db;   // dBFS
-    float alarm_freq_min_hz;    // 0 = from DC
-    float alarm_freq_max_hz;    // 0 = up to Nyquist
-    bool alarm_vibrate;         // Android only
-    // Draw the (current - reference) difference curve in the spectrum.
-    bool baseline_diff_enabled;
 };
 
 AppConfig MakeDefaultAppConfig();

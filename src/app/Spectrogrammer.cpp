@@ -11,6 +11,7 @@
 #include <string.h>
 #include "Processor.h"
 #include "fft.h"
+#include "pass_through.h"
 #include "ScaleUI.h"
 #include "ScaleBufferX.h"
 #include "ScaleBufferY.h"
@@ -19,8 +20,6 @@
 #include "AppConfig.h"
 #include "colormaps.h"
 #include "ModalHoldPicker.h"
-#include "FilePicker.h"
-#include "image_export.h"
 
 #include <GLES3/gl3.h>
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
@@ -32,8 +31,8 @@
 #include "imgui_helpers.h"
 #include "waterfall.h"
 #include "audio/audio_main.h"
-#include "audio/file_source.h"
 #ifdef ANDROID
+#include "audio/audio_SLES.h"
 #include <EGL/egl.h>
 #include <jni.h>
 #include <SLES/OpenSLES.h>
@@ -116,7 +115,6 @@ constexpr int kMaxInputChannels = 2;
 AppConfig gConfig = MakeDefaultAppConfig();
 std::string gConfigPath;
 std::string gWorkingDirectory;
-std::string gFileWorkingDirectory; // WAV import + PNG export (external files dir when available)
 bool gConfigLoaded = false;
 bool gConfigDirty = false;
 
@@ -183,180 +181,6 @@ BufferIODouble gReferenceScaledPowerXY;
 android_app *gAndroidApp = nullptr;
 #endif
 
-enum class AnalysisSource
-{
-    Live = 0,
-    File = 1
-};
-
-AnalysisSource gAnalysisSource = AnalysisSource::Live;
-std::string gFileAudioPath;       // full path of the file being analyzed
-bool gFileLoadFailed = false;
-std::string gFileErrorText;
-long long gFileSeekFrame = 0;     // start offset for the next file session
-long long gFileSessionStartFrame = 0;
-std::atomic<bool> gFilePlaybackFinished{false};
-std::atomic<bool> gSessionStalled{false};
-std::atomic<bool> gAlarmTriggered{false};
-bool gAlarmArmed = false;
-bool gCursorPinned = false;
-bool gFileBrowserOpen = false;
-bool gComparePopupOpen = false;
-float gLevelDb[kMaxInputChannels] = {-120.0f, -120.0f};
-std::string gExportStatus;
-std::vector<float> gAveragePower[kMaxInputChannels];
-bool gAverageValid[kMaxInputChannels] = {false, false};
-BufferIODouble gDiffScaledPowerY;
-BufferIODouble gDiffLine;
-
-// Snapshot of the config values the processing thread needs.  Copied from
-// gConfig (under gStateMutex) on every processed frame, so UI-thread edits
-// never need to be synchronized against the worker.
-struct ProcParams
-{
-    float smoothing = 0.0f;
-    float holdFalloff = 0.0f;
-    bool maxHold = false;
-    bool stereoDifference = false;
-    int processingChannels = 1;
-    int averageFrames = 0;
-    bool alarmEnabled = false;
-    float alarmThresholdDb = -60.0f;
-    float alarmFreqMin = 0.0f;
-    float alarmFreqMax = 0.0f;
-    bool alarmVibrate = false;
-    bool baselineDiff = false;
-};
-
-void format_timecode(long long frames, float sample_rate, char *out, size_t out_size)
-{
-    if (sample_rate <= 0.0f || out == nullptr || out_size == 0)
-    {
-        if (out != nullptr && out_size > 0)
-            out[0] = '\0';
-        return;
-    }
-    const long long total_seconds = (long long)(frames / sample_rate);
-    const int minutes = (int)(total_seconds / 60);
-    const int seconds = (int)(total_seconds % 60);
-    snprintf(out, out_size, "%d:%02d", minutes, seconds);
-}
-
-#ifdef ANDROID
-// One-shot vibration from the processing thread.
-//
-// Two rules make this JNI usage safe:
-//  1. VibrationEffect.createOneShot requires amplitude == DEFAULT_AMPLITUDE
-//     (-1) or 1..255; passing 0 makes the framework throw
-//     IllegalArgumentException.
-//  2. While a Java exception is pending, nearly every other JNI call is a
-//     CheckJNI fatal error (SIGABRT). So after every call that can throw we
-//     ExceptionCheck/ExceptionClear BEFORE doing anything else.
-void alarm_vibrate()
-{
-    if (gAndroidApp == nullptr || gAndroidApp->activity == nullptr || gAndroidApp->activity->vm == nullptr)
-        return;
-
-    JNIEnv *env = nullptr;
-    JavaVM *vm = gAndroidApp->activity->vm;
-    bool attached = false;
-    if (vm->GetEnv((void **)&env, JNI_VERSION_1_6) != JNI_OK)
-    {
-        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK)
-            return;
-        attached = true;
-    }
-
-    auto clear_exception = [&]()
-    {
-        if (env->ExceptionCheck())
-            env->ExceptionClear();
-    };
-
-    auto finish = [&]()
-    {
-        // Safe: ExceptionCheck/ExceptionClear are legal with a pending
-        // exception; everything else happens only after it is cleared.
-        clear_exception();
-        if (attached)
-            vm->DetachCurrentThread();
-    };
-
-    // The processing thread must start the call with a clean VM state.
-    if (env->ExceptionCheck())
-    {
-        clear_exception();
-        return;
-    }
-
-    jclass effectClass = env->FindClass("android/os/VibrationEffect");
-    if (env->ExceptionCheck() || effectClass == nullptr)
-    {
-        finish();
-        return;
-    }
-    const jmethodID createOneShot = env->GetStaticMethodID(effectClass, "createOneShot", "(JI)Landroid/os/VibrationEffect;");
-    if (env->ExceptionCheck() || createOneShot == nullptr)
-    {
-        finish();
-        return;
-    }
-
-    // amplitude must be DEFAULT_AMPLITUDE (-1) or 1..255.
-    jobject effect = env->CallStaticObjectMethod(effectClass, createOneShot, (jlong)150, -1);
-    if (env->ExceptionCheck() || effect == nullptr)
-    {
-        finish();
-        return;
-    }
-
-    jobject context = gAndroidApp->activity->clazz;
-    jclass contextClass = env->GetObjectClass(context);
-    if (env->ExceptionCheck() || contextClass == nullptr)
-    {
-        env->DeleteLocalRef(effect);
-        finish();
-        return;
-    }
-    const jmethodID getSystemService = env->GetMethodID(contextClass, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
-    if (env->ExceptionCheck() || getSystemService == nullptr)
-    {
-        env->DeleteLocalRef(effect);
-        finish();
-        return;
-    }
-    jstring vibratorService = env->NewStringUTF("vibrator");
-    jobject service = env->CallObjectMethod(context, getSystemService, vibratorService);
-    env->DeleteLocalRef(vibratorService);
-    if (env->ExceptionCheck() || service == nullptr)
-    {
-        env->DeleteLocalRef(effect);
-        finish();
-        return;
-    }
-
-    // Vibrator.vibrate(VibrationEffect) returns void since API 26.
-    jclass serviceClass = env->GetObjectClass(service);
-    const jmethodID vibrate = env->GetMethodID(serviceClass, "vibrate", "(Landroid/os/VibrationEffect;)V");
-    if (env->ExceptionCheck() || vibrate == nullptr)
-    {
-        env->DeleteLocalRef(effect);
-        env->DeleteLocalRef(service);
-        finish();
-        return;
-    }
-    env->CallVoidMethod(service, vibrate, effect);
-
-    env->DeleteLocalRef(effect);
-    env->DeleteLocalRef(service);
-    finish();
-}
-#else
-void alarm_vibrate()
-{
-}
-#endif
-
 constexpr int kDefaultAndroidSampleRate = 48000;
 constexpr int kAudioBufferLength = 1024;
 constexpr int kPeakMarkerCapacity = 5;
@@ -368,10 +192,6 @@ constexpr float kMinimumPinchDistanceNormalized = 0.04f;
 constexpr float kSettingsSideMargin = 28.0f;
 constexpr char kGitHubRepositoryUrl[] = "https://github.com/Toby7-7/Spectrogrammer";
 
-int active_input_channel_count();
-bool mode_uses_stereo_difference(InputChannelMode mode, int input_channels);
-int processing_channel_count();
-ProcParams make_proc_params();
 void rebuild_scale_locked(int outputWidth);
 void refresh_display_state_locked(bool updateWaterfall);
 
@@ -1209,34 +1029,9 @@ void refresh_display_state_locked(bool updateWaterfall)
         gSharedState.reference_hold_line.Resize(0);
     }
 
-    // Optional (current - reference) difference curve.  0 dB sits at the
-    // vertical center; +/-60 dB maps to the top/bottom edges.
-    if (gConfig.baseline_diff_enabled &&
-        gDisplayChannelCount > 0 &&
-        display_channel_state(0).live_power_raw.GetSize() > 1 &&
-        display_channel_state(0).live_power_raw.GetSize() == gSharedState.reference_hold_raw.GetSize())
-    {
-        const float *live = display_channel_state(0).live_power_raw.GetData();
-        const float *ref = gSharedState.reference_hold_raw.GetData();
-        const int n = gSharedState.reference_hold_raw.GetSize();
-        gDiffScaledPowerY.Resize(n);
-        float *diff = gDiffScaledPowerY.GetData();
-        for (int i = 0; i < n; i++)
-        {
-            const float diff_db = power_to_db(live[i]) - power_to_db(ref[i]);
-            diff[i] = 0.5f + 0.5f * clamp(diff_db / 60.0f, -1.0f, 1.0f);
-        }
-        generate_spectrum_lines_from_bin_data(&gDiffScaledPowerY, &gDiffLine);
-    }
-    else
-    {
-        gDiffScaledPowerY.Resize(0);
-        gDiffLine.Resize(0);
-    }
-
     update_cursor_db_locked();
 
-    if (updateWaterfall && waterfall_visible() && !gConfig.waterfall_freeze)
+    if (updateWaterfall && waterfall_visible())
     {
         for (int channel = 0; channel < display_channel_count(); channel++)
         {
@@ -1263,136 +1058,34 @@ void stop_processing_session()
             delete gProcessors[channel];
             gProcessors[channel] = nullptr;
         }
-        if (gAnalysisSource == AnalysisSource::File)
-            FileAudio_deinit();
-        else
-            Audio_deinit();
-    }
-    else if (gAnalysisSource == AnalysisSource::File)
-    {
-        // A file session that failed to build still owns a loaded file.
-        FileAudio_deinit();
+        Audio_deinit();
     }
     gProcessingChannelCount = 1;
     gProcessingThreadStop.store(false);
 }
 
-ProcParams make_proc_params()
-{
-    ProcParams p;
-    p.smoothing = gConfig.exponential_smoothing_factor;
-    p.holdFalloff = gConfig.peak_hold_falloff_seconds;
-    p.maxHold = gConfig.max_hold_trace_enabled;
-    p.stereoDifference = mode_uses_stereo_difference(gConfig.input_channel_mode, active_input_channel_count());
-    p.processingChannels = processing_channel_count();
-    p.averageFrames = gConfig.average_frames;
-    p.alarmEnabled = gConfig.alarm_enabled;
-    p.alarmThresholdDb = gConfig.alarm_threshold_db;
-    p.alarmFreqMin = gConfig.alarm_freq_min_hz;
-    p.alarmFreqMax = gConfig.alarm_freq_max_hz;
-    p.alarmVibrate = gConfig.alarm_vibrate;
-    p.baselineDiff = gConfig.baseline_diff_enabled;
-    return p;
-}
-
-// Threshold alarm evaluation; runs on the processing thread under the lock.
-void update_alarm_locked(const ProcParams &p)
-{
-    if (!p.alarmEnabled)
-    {
-        gAlarmArmed = false;
-        gAlarmTriggered.store(false);
-        return;
-    }
-    if (gProcessors[0] == nullptr)
-        return;
-
-    const BufferIODouble *power = gProcessors[0]->getBufferIO();
-    const float *data = power->GetData();
-    const int bin_min = std::max(1, (int)floorf(gProcessors[0]->freq2Bin(p.alarmFreqMin)));
-    const float max_freq = p.alarmFreqMax > 0.0f ? p.alarmFreqMax : gMaxFreq;
-    const int bin_max = std::min(power->GetSize() - 1, (int)ceilf(gProcessors[0]->freq2Bin(max_freq)));
-
-    float peak_db = -200.0f;
-    for (int bin = bin_min; bin <= bin_max; bin++)
-        peak_db = std::max(peak_db, power_to_db(data[bin]));
-
-    if (!gAlarmArmed)
-    {
-        if (peak_db >= p.alarmThresholdDb)
-        {
-            gAlarmArmed = true;
-            gAlarmTriggered.store(true);
-            if (p.alarmVibrate)
-                alarm_vibrate();
-        }
-    }
-    else if (peak_db < p.alarmThresholdDb - 3.0f)
-    {
-        // 3 dB hysteresis so the alarm does not chatter on the boundary.
-        gAlarmArmed = false;
-        gAlarmTriggered.store(false);
-    }
-}
-
 void processing_loop()
 {
-    using Clock = std::chrono::steady_clock;
-    Clock::time_point lastActivity = Clock::now();
-    float frame_dt = gAnalysisSecondsPerFrame;
-
     while (!gProcessingThreadStop.load())
     {
-        bool processed = false;
+        int processed_frames = 0;
         {
             std::lock_guard<std::mutex> lock(gStateMutex);
-            if (gProcessors[0] == nullptr)
-                break;
-
-            const ProcParams p = make_proc_params();
-
-            // One lock scope per frame (not per 32-frame burst) so UI-thread
-            // operations only ever wait for a single ~20 ms of analysis.
-            if (gChunker.Process(gProcessors, p.processingChannels, gHopSamples, p.stereoDifference))
+            while (gProcessors[0] != nullptr &&
+                   gChunker.Process(
+                       gProcessors,
+                       processing_channel_count(),
+                       gHopSamples,
+                       mode_uses_stereo_difference(gConfig.input_channel_mode, active_input_channel_count())))
             {
-                processed = true;
-                const auto now = Clock::now();
-                frame_dt = clamp(std::chrono::duration<float>(now - lastActivity).count(), 0.005f, 0.5f);
-                lastActivity = now;
-
-                for (int channel = 0; channel < p.processingChannels; channel++)
+                for (int channel = 0; channel < processing_channel_count(); channel++)
                 {
                     SharedState::ChannelState &state = channel_state(channel);
-                    gProcessors[channel]->computePower(p.smoothing);
+                    gProcessors[channel]->computePower(gConfig.exponential_smoothing_factor);
                     BufferIODouble *power = gProcessors[channel]->getBufferIO();
                     state.live_power_raw.copy(power);
 
-                    // Level meter (dBFS from the strongest bin; power_to_db
-                    // already normalizes the int16-scale samples to full-scale).
-                    gLevelDb[channel] = clamp(power_to_db(gProcessors[channel]->getLastPeakPower()), -120.0f, 0.0f);
-
-                    // Optional time-averaged spectrum (exponential moving
-                    // average with alpha = 1/N).
-                    if (p.averageFrames > 0)
-                    {
-                        const int n = power->GetSize();
-                        float *raw = state.live_power_raw.GetData();
-                        if (gAveragePower[channel].size() != (size_t)n || !gAverageValid[channel])
-                        {
-                            gAveragePower[channel].assign(raw, raw + n);
-                            gAverageValid[channel] = true;
-                        }
-                        else
-                        {
-                            const float alpha = 1.0f / (float)p.averageFrames;
-                            float *avg = gAveragePower[channel].data();
-                            for (int i = 0; i < n; i++)
-                                avg[i] += (raw[i] - avg[i]) * alpha;
-                        }
-                        memcpy(raw, gAveragePower[channel].data(), (size_t)n * sizeof(float));
-                    }
-
-                    if (p.maxHold)
+                    if (gConfig.max_hold_trace_enabled)
                     {
                         if (!state.peak_hold_valid || state.peak_hold_raw.GetSize() != power->GetSize())
                         {
@@ -1406,16 +1099,14 @@ void processing_loop()
                             for (int i = 0; i < power->GetSize(); i++)
                             {
                                 const float live_db = power_to_db(live_data[i]);
-                                if (p.holdFalloff <= 0.0f)
+                                if (gConfig.peak_hold_falloff_seconds <= 0.0f)
                                 {
                                     const float held_db = power_to_db(peak_data[i]);
                                     peak_data[i] = db_to_power(std::max(live_db, held_db));
                                 }
                                 else
                                 {
-                                    // Real-time decay based on measured frame
-                                    // spacing, not the nominal interval.
-                                    const float falloff_db = (90.0f * frame_dt) / p.holdFalloff;
+                                    const float falloff_db = (90.0f * gAnalysisSecondsPerFrame) / gConfig.peak_hold_falloff_seconds;
                                     const float held_db = power_to_db(peak_data[i]) - falloff_db;
                                     peak_data[i] = db_to_power(std::max(live_db, held_db));
                                 }
@@ -1427,8 +1118,6 @@ void processing_loop()
                         clear_peak_hold_locked(channel);
                     }
                 }
-
-                update_alarm_locked(p);
 
                 bool update_waterfall = false;
                 if (gWaterfallSecondsPerRow <= gAnalysisSecondsPerFrame + 1e-6f)
@@ -1449,26 +1138,14 @@ void processing_loop()
                 if (!gDisplayPaused)
                     refresh_display_state_locked(update_waterfall);
 
-                // File session finished: the feeder has pushed everything and
-                // the consumer drained it.
-                if (gAnalysisSource == AnalysisSource::File && FileAudio_atEnd())
-                {
-                    const long long frames_in_session = FileAudio_totalFrames() - gFileSessionStartFrame;
-                    if (gChunker.getConsumedFrames() + gHopSamples >= frames_in_session)
-                        gFilePlaybackFinished.store(true);
-                }
+                processed_frames++;
+                if (processed_frames >= kProcessingBurstLimit)
+                    break;
             }
         }
 
-        if (!processed)
-        {
-            // Stall watchdog: if no data arrives for over a second the input
-            // pipeline is wedged; ask the UI thread to restart the session.
-            const auto now = Clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastActivity).count() > 1000)
-                gSessionStalled.store(true);
+        if (processed_frames == 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
     }
 }
 
@@ -1478,93 +1155,46 @@ void start_processing_session()
 
     std::lock_guard<std::mutex> lock(gStateMutex);
 
-    gSessionStalled.store(false);
-    gAlarmArmed = false;
-    gAlarmTriggered.store(false);
-    gLevelDb[0] = -120.0f;
-    gLevelDb[1] = -120.0f;
-    gAverageValid[0] = false;
-    gAverageValid[1] = false;
-    gAveragePower[0].clear();
-    gAveragePower[1].clear();
-    gDiffLine.Resize(0);
-    gDiffScaledPowerY.Resize(0);
-
+    const int preferred_sample_rate = configured_sample_rate();
+    gRequestedInputChannels = preferred_input_channel_count();
+    gActiveInputChannels = 1;
+    gProcessingChannelCount = 1;
+    gDisplayChannelCount = 1;
+    gInputChannelsFallbackActive = false;
     bool audio_started = false;
-    AudioQueue *pFreeQueue = nullptr;
-    AudioQueue *pRecQueue = nullptr;
-
-    if (gAnalysisSource == AnalysisSource::File)
+    const int channel_candidates[2] = {gRequestedInputChannels, 1};
+    const int channel_candidate_count = gRequestedInputChannels >= 2 ? 2 : 1;
+    for (int candidate_index = 0; candidate_index < channel_candidate_count; candidate_index++)
     {
-        // File analysis: same pipeline as live capture, fed by the realtime
-        // WAV feeder.  No rate/channel fallbacks and no config rewrites -
-        // the file's sample rate and channels are what they are.
-        gFileLoadFailed = false;
-        gFileErrorText.clear();
-        gFilePlaybackFinished.store(false);
-        gFileSessionStartFrame = gFileSeekFrame;
+        const int candidate_channels = channel_candidates[candidate_index];
 
-        if (gFileAudioPath.empty() || !FileAudio_init(gFileAudioPath.c_str(), kAudioBufferLength, gFileSeekFrame))
+        for (int candidate_rate : sample_rate_fallbacks(preferred_sample_rate))
         {
-            gFileLoadFailed = true;
-            gFileErrorText = FileAudio_errorText();
-            return;
-        }
-
-        gInputSampleRate = FileAudio_getSampleRate();
-        gRequestedInputChannels = FileAudio_getInputChannelCount();
-        gActiveInputChannels = gRequestedInputChannels;
-        gInputChannelsFallbackActive = false;
-        gDisplayChannelCount = 1;
-        gProcessingChannelCount = 1;
-
-        FileAudio_getBufferQueues(&pFreeQueue, &pRecQueue);
-        audio_started = true;
-    }
-    else
-    {
-        const int preferred_sample_rate = configured_sample_rate();
-        gRequestedInputChannels = preferred_input_channel_count();
-        gActiveInputChannels = 1;
-        gProcessingChannelCount = 1;
-        gDisplayChannelCount = 1;
-        gInputChannelsFallbackActive = false;
-        const int channel_candidates[2] = {gRequestedInputChannels, 1};
-        const int channel_candidate_count = gRequestedInputChannels >= 2 ? 2 : 1;
-        for (int candidate_index = 0; candidate_index < channel_candidate_count; candidate_index++)
-        {
-            const int candidate_channels = channel_candidates[candidate_index];
-
-            for (int candidate_rate : sample_rate_fallbacks(preferred_sample_rate))
+            if (!Audio_init(static_cast<unsigned int>(candidate_rate), kAudioBufferLength, map_audio_source_preset(gConfig.audio_source_mode), candidate_channels))
+                continue;
+            if (!Audio_startPlay())
             {
-                if (!Audio_init(static_cast<unsigned int>(candidate_rate), kAudioBufferLength, map_audio_source_preset(gConfig.audio_source_mode), candidate_channels))
-                    continue;
-                if (!Audio_startPlay())
-                {
-                    Audio_deinit();
-                    continue;
-                }
-
-                gInputSampleRate = static_cast<float>(candidate_rate);
-                gActiveInputChannels = Audio_getInputChannelCount();
-                gInputChannelsFallbackActive = gActiveInputChannels < gRequestedInputChannels;
-                if (gConfig.sampling_rate_mode == SamplingRateMode::Fixed && gConfig.sample_rate_hz != candidate_rate)
-                {
-                    gConfig.sample_rate_hz = candidate_rate;
-                    gConfigDirty = true;
-                }
-                audio_started = true;
-                break;
+                Audio_deinit();
+                continue;
             }
-            if (audio_started)
-                break;
+
+            gInputSampleRate = static_cast<float>(candidate_rate);
+            gActiveInputChannels = Audio_getInputChannelCount();
+            gInputChannelsFallbackActive = gActiveInputChannels < gRequestedInputChannels;
+            if (gConfig.sampling_rate_mode == SamplingRateMode::Fixed && gConfig.sample_rate_hz != candidate_rate)
+            {
+                gConfig.sample_rate_hz = candidate_rate;
+                gConfigDirty = true;
+            }
+            audio_started = true;
+            break;
         }
-
-        if (!audio_started)
-            return;
-
-        Audio_getBufferQueues(&pFreeQueue, &pRecQueue);
+        if (audio_started)
+            break;
     }
+
+    if (!audio_started)
+        return;
 
     gEffectiveSampleRate = gInputSampleRate / static_cast<float>(GetDecimationFactor(gConfig));
     const float analysis_interval_ms = std::min(clamp_transform_interval_ms(gConfig.desired_transform_interval_ms), 20.0f);
@@ -1573,6 +1203,9 @@ void start_processing_session()
     gWaterfallSecondsPerRow = clamp_transform_interval_ms(gConfig.desired_transform_interval_ms) / 1000.0f;
     gWaterfallRowAccumulator = 0.0f;
 
+    AudioQueue *pFreeQueue = nullptr;
+    AudioQueue *pRecQueue = nullptr;
+    Audio_getBufferQueues(&pFreeQueue, &pRecQueue);
     gChunker.SetQueues(pRecQueue, pFreeQueue, gActiveInputChannels);
     gChunker.begin();
     gProcessingChannelCount = processing_channel_count_for_mode(gConfig.input_channel_mode, gActiveInputChannels);
@@ -1587,9 +1220,6 @@ void start_processing_session()
         gProcessors[channel] = new myFFT();
         gProcessors[channel]->init(gConfig.fft_size, gInputSampleRate, GetDecimationFactor(gConfig), gConfig.window_function);
     }
-
-    // Safe here: the processing thread is not running yet.
-    SetColorMap(gConfig.color_map);
 
     apply_frequency_axis_defaults_locked();
     if (gFrequencyPlotWidth > 0)
@@ -1621,67 +1251,6 @@ void restart_processing_session()
     start_processing_session();
 }
 
-#ifdef ANDROID
-// External files dir (/sdcard/Android/data/<pkg>/files) so the user can
-// drop WAV files in with a file manager or adb. Falls back to the internal
-// data dir when unavailable.
-static std::string get_external_files_dir(android_app *app)
-{
-    if (app == nullptr || app->activity == nullptr || app->activity->vm == nullptr)
-        return std::string();
-
-    JNIEnv *env = nullptr;
-    JavaVM *vm = app->activity->vm;
-    bool attached = false;
-    if (vm->GetEnv((void **)&env, JNI_VERSION_1_6) != JNI_OK)
-    {
-        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK)
-            return std::string();
-        attached = true;
-    }
-
-    auto finish = [&]()
-    {
-        if (attached)
-            vm->DetachCurrentThread();
-    };
-
-    jclass ctxCls = env->GetObjectClass(app->activity->clazz);
-    jmethodID getDir = env->GetMethodID(ctxCls, "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;");
-    if (getDir == nullptr)
-    {
-        finish();
-        return std::string();
-    }
-    jobject file = env->CallObjectMethod(app->activity->clazz, getDir, (jstring)nullptr);
-    if (file == nullptr)
-    {
-        finish();
-        return std::string();
-    }
-
-    std::string result;
-    jclass fileCls = env->GetObjectClass(file);
-    jmethodID getPath = env->GetMethodID(fileCls, "getPath", "()Ljava/lang/String;");
-    if (getPath != nullptr)
-    {
-        jstring pathStr = (jstring)env->CallObjectMethod(file, getPath);
-        if (pathStr != nullptr)
-        {
-            const char *chars = env->GetStringUTFChars(pathStr, nullptr);
-            if (chars != nullptr)
-            {
-                result = chars;
-                env->ReleaseStringUTFChars(pathStr, chars);
-            }
-            env->DeleteLocalRef(pathStr);
-        }
-    }
-    finish();
-    return result;
-}
-#endif
-
 void load_config_if_needed(void *window)
 {
     if (gConfigLoaded)
@@ -1691,14 +1260,9 @@ void load_config_if_needed(void *window)
     android_app *app = static_cast<android_app *>(window);
     gWorkingDirectory = app->activity->internalDataPath;
     gConfigPath = gWorkingDirectory + "/spectrogrammer.cfg";
-
-    gFileWorkingDirectory = get_external_files_dir(app);
-    if (gFileWorkingDirectory.empty())
-        gFileWorkingDirectory = gWorkingDirectory;
 #else
     (void)window;
     gWorkingDirectory = ".";
-    gFileWorkingDirectory = ".";
     gConfigPath = "./spectrogrammer.cfg";
 #endif
 
@@ -2486,82 +2050,6 @@ void render_analysis_settings()
         gConfig.exponential_smoothing_factor = smoothing;
         mark_config_dirty();
     }
-
-    char average_label[32];
-    if (gConfig.average_frames == 0)
-        snprintf(average_label, sizeof(average_label), "%s", ui_text("Off", "关闭"));
-    else
-        snprintf(average_label, sizeof(average_label), use_chinese_ui() ? "%d 帧平均" : "%d-frame average", gConfig.average_frames);
-    render_setting_label(ui_text("Time-averaged spectrum", "时间平均频谱"));
-    set_full_width_item();
-    if (ImGui::BeginCombo("##average_frames", average_label))
-    {
-        const int average_options[] = {0, 16, 32, 64};
-        for (int value : average_options)
-        {
-            char label[32];
-            if (value == 0)
-                snprintf(label, sizeof(label), "%s", ui_text("Off", "关闭"));
-            else
-                snprintf(label, sizeof(label), use_chinese_ui() ? "%d 帧平均" : "%d-frame average", value);
-            const bool selected = gConfig.average_frames == value;
-            if (ImGui::Selectable(label, selected))
-            {
-                gConfig.average_frames = value;
-                mark_config_dirty();
-            }
-            if (selected)
-                ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-
-    render_section_title(ui_text("Threshold alarm", "阈值报警"));
-    bool alarm_enabled = gConfig.alarm_enabled;
-    if (ImGui::Checkbox(ui_text("Enable alarm", "启用报警"), &alarm_enabled))
-    {
-        gConfig.alarm_enabled = alarm_enabled;
-        mark_config_dirty();
-    }
-
-    if (gConfig.alarm_enabled)
-    {
-        float alarm_threshold = gConfig.alarm_threshold_db;
-        render_setting_label(ui_text("Threshold (dBFS)", "阈值（dBFS）"));
-        set_full_width_item();
-        if (ImGui::SliderFloat("##alarm_threshold", &alarm_threshold, -100.0f, -20.0f, "%.0f dB"))
-        {
-            gConfig.alarm_threshold_db = alarm_threshold;
-            mark_config_dirty();
-        }
-
-        float alarm_min = gConfig.alarm_freq_min_hz;
-        render_setting_label(ui_text("Frequency range min (Hz)", "频率范围下限（Hz）"));
-        set_full_width_item();
-        if (ImGui::SliderFloat("##alarm_freq_min", &alarm_min, 0.0f, 192000.0f, "%.0f Hz"))
-        {
-            gConfig.alarm_freq_min_hz = alarm_min;
-            mark_config_dirty();
-        }
-
-        float alarm_max = gConfig.alarm_freq_max_hz;
-        render_setting_label(ui_text("Frequency range max (0 = Nyquist)", "频率范围上限（0 = 奈奎斯特）"));
-        set_full_width_item();
-        if (ImGui::SliderFloat("##alarm_freq_max", &alarm_max, 0.0f, 192000.0f, "%.0f Hz"))
-        {
-            gConfig.alarm_freq_max_hz = alarm_max;
-            mark_config_dirty();
-        }
-
-#ifdef ANDROID
-        bool alarm_vibrate = gConfig.alarm_vibrate;
-        if (ImGui::Checkbox(ui_text("Vibrate when triggered", "触发时振动"), &alarm_vibrate))
-        {
-            gConfig.alarm_vibrate = alarm_vibrate;
-            mark_config_dirty();
-        }
-#endif
-    }
 }
 
 void render_spectrum_waterfall_settings()
@@ -2711,44 +2199,6 @@ void render_spectrum_waterfall_settings()
         apply_display_change(false, false);
     }
 
-    bool waterfall_freeze = gConfig.waterfall_freeze;
-    if (ImGui::Checkbox(ui_text("Freeze waterfall (keep scrolling the spectrum)", "冻结瀑布图（频谱继续更新）"), &waterfall_freeze))
-    {
-        gConfig.waterfall_freeze = waterfall_freeze;
-        mark_config_dirty();
-    }
-
-    render_setting_label(ui_text("Waterfall color map", "瀑布图配色"));
-    set_full_width_item();
-    if (ImGui::BeginCombo("##color_map", gConfig.color_map == 0 ? ui_text("Magma", "岩浆") : (gConfig.color_map == 1 ? ui_text("Hot / cold", "热冷") : ui_text("Grayscale", "灰度"))))
-    {
-        const char *map_names[] = {ui_text("Magma", "岩浆"), ui_text("Hot / cold", "热冷"), ui_text("Grayscale", "灰度")};
-        for (int value = 0; value < 3; value++)
-        {
-            const bool selected = gConfig.color_map == value;
-            if (ImGui::Selectable(map_names[value], selected))
-            {
-                gConfig.color_map = value;
-                {
-                    std::lock_guard<std::mutex> lock(gStateMutex);
-                    SetColorMap(gConfig.color_map);
-                }
-                mark_config_dirty();
-            }
-            if (selected)
-                ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-
-    bool baseline_diff = gConfig.baseline_diff_enabled;
-    if (ImGui::Checkbox(ui_text("Show baseline difference curve", "显示基线差值曲线"), &baseline_diff))
-    {
-        gConfig.baseline_diff_enabled = baseline_diff;
-        mark_config_dirty();
-        apply_display_change(false, false);
-    }
-
     render_setting_label(ui_text("Waterfall height", "瀑布图高度"));
     set_full_width_item();
     if (ImGui::BeginCombo("##waterfall_size", waterfall_size_label(gConfig.waterfall_size_mode)))
@@ -2866,15 +2316,6 @@ void render_settings_home_page()
         }
         ImGui::Spacing();
     }
-
-    char compare_summary[160];
-    snprintf(compare_summary, sizeof(compare_summary), "%s",
-             ui_text("Load a saved trace, diff against current", "加载保存的曲线，与当前对比"));
-    if (render_settings_navigation_card("settings_card_compare", ui_text("Compare", "对比"), compare_summary))
-    {
-        gComparePopupOpen = true;
-        set_settings_page(SettingsPage::None);
-    }
 }
 
 void render_settings_page()
@@ -2913,116 +2354,6 @@ void render_settings_page()
     end_settings_page_layout();
 }
 
-void draw_file_bar()
-{
-    long long pos_frames = 0;
-    long long total_frames = 0;
-    float rate = 0.0f;
-    const bool active = FileAudio_active();
-    if (active)
-    {
-        pos_frames = FileAudio_positionFrames();
-        total_frames = FileAudio_totalFrames();
-        rate = FileAudio_getSampleRate();
-    }
-
-    char pos_text[16];
-    char total_text[16];
-    format_timecode(pos_frames, rate, pos_text, sizeof(pos_text));
-    format_timecode(total_frames, rate, total_text, sizeof(total_text));
-
-    const float rate_label = gAnalysisSource == AnalysisSource::File ? rate : 0.0f;
-    ImGui::TextUnformatted(FileAudio_fileName());
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s / %s  ·  %.0f Hz", pos_text, total_text, rate_label);
-
-    if (active && total_frames > 0)
-    {
-        static float seek_display = 0.0f;
-        static bool was_dragging = false;
-
-        if (!was_dragging)
-            seek_display = (float)((double)pos_frames / (double)total_frames);
-
-        if (ImGui::SliderFloat("##file_seek", &seek_display, 0.0f, 1.0f))
-            was_dragging = true;
-
-        const bool dragging = ImGui::IsItemActive();
-        if (dragging)
-            was_dragging = true;
-        if (was_dragging && !dragging)
-        {
-            // Commit the seek on release: restart the file session at the
-            // chosen offset (the file branch re-inits at gFileSeekFrame).
-            was_dragging = false;
-            gFileSeekFrame = (long long)(seek_display * (double)total_frames);
-            restart_processing_session();
-        }
-    }
-}
-
-void draw_file_browser_popup()
-{
-    static linked_list *wav_list = nullptr;
-    static bool wav_list_fresh = false;
-    static char wav_selection[512];
-
-    if (gFileBrowserOpen)
-    {
-        gFileBrowserOpen = false;
-        if (wav_list != nullptr)
-        {
-            FreeLinkedList(wav_list);
-            wav_list = nullptr;
-        }
-        const char *suffixes[] = {".wav"};
-        wav_list = GetFilesInFolderEx(gFileWorkingDirectory.c_str(), suffixes, 1);
-        wav_list = SortLinkedList(wav_list);
-        wav_list_fresh = true;
-        wav_selection[0] = '\0';
-        ImGui::OpenPopup(ui_text("Open audio file", "打开音频文件"));
-    }
-
-    if (!ImGui::BeginPopupModal(ui_text("Open audio file###file_browser", "打开音频文件###file_browser"), nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-        return;
-
-    ImGui::TextUnformatted(ui_text("Select a WAV file (app external files dir):", "选择 WAV 文件（应用外部文件目录）："));
-    ImGui::Separator();
-
-    bool any = false;
-    for (linked_list *node = wav_list; node != nullptr; node = node->pNext)
-    {
-        any = true;
-        if (ImGui::Selectable(node->pStr, strcmp(node->pStr, wav_selection) == 0))
-            snprintf(wav_selection, sizeof(wav_selection), "%s", node->pStr);
-    }
-    if (!any)
-        ImGui::TextDisabled(ui_text("No .wav files found.", "未找到 .wav 文件。"));
-
-    ImGui::Separator();
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.0f, 8.0f));
-    if (touch_button(ui_text("Load", "加载"), ImVec2(-1.0f, 0.0f)) && wav_selection[0] != '\0')
-    {
-        char full_path[1200];
-        if (snprintf(full_path, sizeof(full_path), "%s/%s", gFileWorkingDirectory.c_str(), wav_selection) > 0)
-        {
-            gFileAudioPath.assign(full_path);
-            gFileSeekFrame = 0;
-            gFileLoadFailed = false;
-            gAnalysisSource = AnalysisSource::File;
-            gDisplayPaused = false;
-            restart_processing_session();
-        }
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::SameLine();
-    if (touch_button(ui_text("Cancel", "取消"), ImVec2(-1.0f, 0.0f)))
-        ImGui::CloseCurrentPopup();
-    ImGui::PopStyleVar();
-
-    ImGui::EndPopup();
-}
-
 void draw_toolbar()
 {
     ImGui::Dummy(ImVec2(0.0f, top_safe_padding()));
@@ -3032,46 +2363,10 @@ void draw_toolbar()
 
     const float row_height = std::max(68.0f, large_button_height() * 0.76f);
     const float width = ImGui::GetContentRegionAvail().x;
-    const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * 4.0f) / 5.0f;
-    const bool file_mode = gAnalysisSource == AnalysisSource::File;
-    const bool file_finished = gFilePlaybackFinished.load();
+    const float button_width = (width - ImGui::GetStyle().ItemSpacing.x * 3.0f) / 4.0f;
 
-    if (touch_button(file_mode ? ui_text("Close", "关闭") : ui_text("File", "文件"), ImVec2(button_width, row_height)))
-    {
-        if (file_mode)
-        {
-            gAnalysisSource = AnalysisSource::Live;
-            gFileAudioPath.clear();
-            gFileSeekFrame = 0;
-            gFileLoadFailed = false;
-            gFilePlaybackFinished.store(false);
-            gDisplayPaused = false;
-            restart_processing_session();
-        }
-        else
-        {
-            gFileBrowserOpen = true;
-        }
-    }
-
-    ImGui::SameLine();
-    if (file_mode && file_finished)
-    {
-        ImGui::BeginDisabled();
-        touch_button(ui_text("Done", "完成"), ImVec2(button_width, row_height));
-        ImGui::EndDisabled();
-    }
-    else if (touch_button(gDisplayPaused ? ui_text("Resume", "继续") : ui_text("Pause", "暂停"), ImVec2(button_width, row_height)))
-    {
-        if (file_mode)
-        {
-            if (gDisplayPaused)
-                FileAudio_startPlay();
-            else
-                FileAudio_pausePlay();
-        }
+    if (touch_button(gDisplayPaused ? ui_text("Resume", "继续") : ui_text("Pause", "暂停"), ImVec2(button_width, row_height)))
         gDisplayPaused = !gDisplayPaused;
-    }
 
     ImGui::SameLine();
     if (touch_button(ui_text("Clear Peaks", "清除峰值"), ImVec2(button_width, row_height)))
@@ -3082,44 +2377,19 @@ void draw_toolbar()
     }
 
     ImGui::SameLine();
-    if (gCursorActive)
+    ImGui::BeginDisabled(!gCursorActive);
+    if (touch_button(ui_text("Clear Cursor", "清除游标"), ImVec2(button_width, row_height)))
     {
-        if (touch_button(gCursorPinned ? ui_text("Clear Cursor", "清除游标") : ui_text("Pin", "固定"), ImVec2(button_width, row_height)))
-        {
-            if (gCursorPinned)
-            {
-                gCursorPinned = false;
-                gCursorActive = false;
-                gCursorDragging = false;
-            }
-            else
-            {
-                gCursorPinned = true;
-            }
-        }
+        std::lock_guard<std::mutex> lock(gStateMutex);
+        gCursorActive = false;
+        gCursorDragging = false;
     }
-    else
-    {
-        ImGui::BeginDisabled();
-        touch_button(ui_text("Clear Cursor", "清除游标"), ImVec2(button_width, row_height));
-        ImGui::EndDisabled();
-    }
+    ImGui::EndDisabled();
 
     ImGui::SameLine();
     if (touch_button(ui_text("Settings", "设置"), ImVec2(button_width, row_height)))
         set_settings_page(SettingsPage::Home);
     ImGui::PopStyleVar(3);
-
-    if (file_mode)
-    {
-        draw_file_bar();
-        if (gFileLoadFailed)
-            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s%s", ui_text("Cannot open file: ", "无法打开文件："), gFileErrorText.c_str());
-        else if (file_finished)
-            ImGui::TextDisabled("%s", ui_text("Playback finished - tap Close to return to live input.", "播放完成，点“关闭”返回实时采集。"));
-        else if (gDisplayPaused)
-            ImGui::TextDisabled("%s", ui_text("Paused", "已暂停"));
-    }
 
     float axis_min = 0.0f;
     float axis_max = 0.0f;
@@ -3131,201 +2401,44 @@ void draw_toolbar()
     char axis_min_label[32];
     char axis_max_label[32];
     char channel_status[64];
-    char status[384];
-    char level_text[64];
-    char cursor_text[96];
+    char status[256];
     format_frequency(axis_min_label, sizeof(axis_min_label), axis_min);
     format_frequency(axis_max_label, sizeof(axis_max_label), axis_max);
     snprintf(
         channel_status,
         sizeof(channel_status),
         "%s",
-        file_mode
-            ? ui_text("File", "文件")
-            : (gInputChannelsFallbackActive
-                   ? ui_text("Mono (stereo fallback)", "单声道（双声道回退）")
-                   : (active_input_channel_count() >= 2 ? ui_text("Stereo", "双声道") : ui_text("Mono", "单声道"))));
-
-    {
-        float left_db = -120.0f;
-        float right_db = -120.0f;
-        {
-            std::lock_guard<std::mutex> lock(gStateMutex);
-            left_db = gLevelDb[0];
-            right_db = gLevelDb[1];
-        }
-        const bool stereo = active_input_channel_count() >= 2 && gDisplayChannelCount >= 2;
-        if (use_chinese_ui())
-            snprintf(level_text, sizeof(level_text),
-                     stereo ? "  ·  左 %.1f dB  右 %.1f dB" : "  ·  电平 %.1f dB",
-                     left_db, stereo ? right_db : 0.0f);
-        else
-            snprintf(level_text, sizeof(level_text),
-                     stereo ? "  ·  L %.1f dB  R %.1f dB" : "  ·  Level %.1f dB",
-                     left_db, stereo ? right_db : 0.0f);
-    }
-
-    cursor_text[0] = '\0';
-    if (gCursorActive)
-    {
-        char cursor_freq[32];
-        format_frequency(cursor_freq, sizeof(cursor_freq), gCursorFrequencyHz);
-        if (use_chinese_ui())
-            snprintf(cursor_text, sizeof(cursor_text), "  ·  游标 %s %.1f dB%s", cursor_freq, gCursorDb[0], gCursorPinned ? "（固定）" : "");
-        else
-            snprintf(cursor_text, sizeof(cursor_text), "  ·  Cursor %s %.1f dB%s", cursor_freq, gCursorDb[0], gCursorPinned ? " (pin)" : "");
-    }
-
-    const char *source_label = file_mode ? ui_text("File", "文件") : ui_text("Input", "输入");
+        gInputChannelsFallbackActive
+            ? ui_text("Mono (stereo fallback)", "单声道（双声道回退）")
+            : (active_input_channel_count() >= 2 ? ui_text("Stereo", "双声道") : ui_text("Mono", "单声道")));
     if (use_chinese_ui())
         snprintf(
             status,
             sizeof(status),
-            "%s %.0f Hz / %s / %s  ·  视图 %s - %s  ·  FFT %d  ·  %.1f Hz/bin%s%s",
-            source_label,
+            "输入 %.0f Hz / %s / %s  ·  视图 %s - %s  ·  FFT %d  ·  %.1f Hz/bin",
             gInputSampleRate,
             input_channel_label(gConfig.input_channel_mode),
             channel_status,
             axis_min_label,
             axis_max_label,
             gConfig.fft_size,
-            gEffectiveSampleRate / (float)gConfig.fft_size,
-            level_text,
-            cursor_text);
+            gEffectiveSampleRate / (float)gConfig.fft_size);
     else
         snprintf(
             status,
             sizeof(status),
-            "%s %.0f Hz / %s / %s  ·  View %s - %s  ·  FFT %d  ·  %.1f Hz/bin%s%s",
-            source_label,
+            "Input %.0f Hz / %s / %s  ·  View %s - %s  ·  FFT %d  ·  %.1f Hz/bin",
             gInputSampleRate,
             input_channel_label(gConfig.input_channel_mode),
             channel_status,
             axis_min_label,
             axis_max_label,
             gConfig.fft_size,
-            gEffectiveSampleRate / (float)gConfig.fft_size,
-            level_text,
-            cursor_text);
-    if (gAlarmTriggered.load())
-        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "%s", ui_text("!! Alarm !!", "!! 报警 !!"));
-    if (!gExportStatus.empty())
-        ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", gExportStatus.c_str());
+            gEffectiveSampleRate / (float)gConfig.fft_size);
     ImGui::TextDisabled("%s", status);
     ImGui::SetCursorPosY(std::max(0.0f, ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y));
     ImGui::Dummy(ImVec2(0.0f, 0.0f));
 }
-
-namespace
-{
-void draw_polyline_rgba(uint8_t *rgba, int width, int height, const float *points, int point_count, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
-{
-    if (point_count < 2)
-        return;
-    for (int i = 1; i < point_count; i++)
-    {
-        const float x0 = clamp(points[2 * (i - 1) + 0], 0.0f, 1.0f) * (float)width;
-        const float y0 = clamp(points[2 * (i - 1) + 1], 0.0f, 1.0f) * (float)height;
-        const float x1 = clamp(points[2 * i + 0], 0.0f, 1.0f) * (float)width;
-        const float y1 = clamp(points[2 * i + 1], 0.0f, 1.0f) * (float)height;
-        const int steps = (int)std::max(2.0f, std::max(fabsf(x1 - x0), fabsf(y1 - y0)) * 2.0f);
-        for (int s = 0; s <= steps; s++)
-        {
-            const int px = (int)(x0 + (x1 - x0) * ((float)s / (float)steps));
-            const int py = (int)(y0 + (y1 - y0) * ((float)s / (float)steps));
-            if (px < 0 || px >= width || py < 0 || py >= height)
-                continue;
-            uint8_t *px_ptr = rgba + ((size_t)py * (size_t)width + (size_t)px) * 4;
-            // Simple alpha blend.
-            const float alpha = a / 255.0f;
-            px_ptr[0] = (uint8_t)(r * alpha + px_ptr[0] * (1.0f - alpha));
-            px_ptr[1] = (uint8_t)(g * alpha + px_ptr[1] * (1.0f - alpha));
-            px_ptr[2] = (uint8_t)(b * alpha + px_ptr[2] * (1.0f - alpha));
-        }
-    }
-}
-
-// Renders the current spectrum (all display channels + reference) into an
-// RGBA buffer of the given size.
-bool render_spectrum_to_rgba(uint8_t *rgba, int width, int height)
-{
-    BufferIODouble liveLines[kMaxInputChannels];
-    BufferIODouble peakLines[kMaxInputChannels];
-    BufferIODouble referenceLine;
-    int channel_count = 0;
-    {
-        std::lock_guard<std::mutex> lock(gStateMutex);
-        channel_count = display_channel_count();
-        for (int channel = 0; channel < channel_count; channel++)
-        {
-            liveLines[channel].copy(&display_channel_state(channel).live_line);
-            peakLines[channel].copy(&display_channel_state(channel).peak_hold_line);
-        }
-        referenceLine.copy(&gSharedState.reference_hold_line);
-    }
-
-    for (int channel = 0; channel < channel_count; channel++)
-    {
-        if (liveLines[channel].GetSize() > 1)
-            draw_polyline_rgba(rgba, width, height, liveLines[channel].GetData(), liveLines[channel].GetSize() / 2,
-                               90 + channel * 60, 220 - channel * 40, 120, 255);
-        if (gConfig.max_hold_trace_enabled && peakLines[channel].GetSize() > 1)
-            draw_polyline_rgba(rgba, width, height, peakLines[channel].GetData(), peakLines[channel].GetSize() / 2,
-                               255, 120, 60, 255);
-    }
-    if (referenceLine.GetSize() > 1)
-        draw_polyline_rgba(rgba, width, height, referenceLine.GetData(), referenceLine.GetSize() / 2, 160, 90, 255, 255);
-    return true;
-}
-
-std::string build_export_name(const char *suffix)
-{
-    char stamp[32];
-    time_t now = time(nullptr);
-    struct tm tm_info;
-    localtime_r(&now, &tm_info);
-    strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm_info);
-    return gFileWorkingDirectory + "/" + std::string("spectrogrammer_") + stamp + suffix;
-}
-
-void save_analysis_png()
-{
-    gExportStatus.clear();
-
-    int channels_saved = 0;
-    for (int channel = 0; channel < kMaxInputChannels; channel++)
-    {
-        Waterfall_applyPendingUpload(channel);
-        const std::vector<uint16_t> *data = Waterfall_imageData(channel);
-        const int w = Waterfall_imageWidth(channel);
-        const int h = Waterfall_imageHeight(channel);
-        if (data == nullptr || w <= 0 || h <= 0 || data->empty())
-            continue;
-        char suffix[16];
-        snprintf(suffix, sizeof(suffix), "_waterfall%d.png", channel);
-        const std::string path = build_export_name(suffix);
-        if (WritePngFromRgb565(path.c_str(), w, h, data->data()))
-            channels_saved++;
-    }
-
-    // Spectrum export at a fixed size.
-    const int spec_w = 1024;
-    const int spec_h = 320;
-    std::vector<uint8_t> spec_rgba((size_t)spec_w * (size_t)spec_h * 4, 0);
-    render_spectrum_to_rgba(spec_rgba.data(), spec_w, spec_h);
-    const std::string spec_path = build_export_name("_spectrum.png");
-    if (!WritePngRgba(spec_path.c_str(), spec_w, spec_h, spec_rgba.data()))
-    {
-        gExportStatus = "PNG export failed";
-        return;
-    }
-
-    if (use_chinese_ui())
-        gExportStatus = "已导出 " + std::to_string(channels_saved + 1) + " 个 PNG 到外部文件目录";
-    else
-        gExportStatus = "Exported " + std::to_string(channels_saved + 1) + " PNG(s) to the external files dir";
-}
-} // namespace
 
 void draw_hold_popup()
 {
@@ -3370,9 +2483,6 @@ void draw_hold_popup()
     }
 
     ImGui::Separator();
-    if (touch_button(ui_text("Save image as PNG", "保存图片为 PNG")))
-        save_analysis_png();
-
     if (touch_button(ui_text("Close", "关闭")))
         ImGui::CloseCurrentPopup();
 
@@ -3553,8 +2663,6 @@ void draw_spectrum(const ImRect &frame_bb)
     BufferIODouble liveLines[kMaxInputChannels];
     BufferIODouble peakLines[kMaxInputChannels];
     BufferIODouble referenceLine;
-    BufferIODouble diffLine;
-    bool diff_enabled = false;
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
         for (int channel = 0; channel < display_channel_count(); channel++)
@@ -3563,8 +2671,6 @@ void draw_spectrum(const ImRect &frame_bb)
             peakLines[channel].copy(&display_channel_state(channel).peak_hold_line);
         }
         referenceLine.copy(&gSharedState.reference_hold_line);
-        diff_enabled = gConfig.baseline_diff_enabled;
-        diffLine.copy(&gDiffLine);
     }
 
     for (int channel = 0; channel < display_channel_count(); channel++)
@@ -3576,15 +2682,6 @@ void draw_spectrum(const ImRect &frame_bb)
     }
     if (referenceLine.GetSize() > 0)
         draw_lines(frame_bb, referenceLine.GetData(), referenceLine.GetSize() / 2, IM_COL32(128, 64, 220, 220), 0, 1);
-
-    if (diff_enabled && diffLine.GetSize() > 0)
-    {
-        // 0 dB center line + the difference curve.
-        const ImVec2 zero_a = ImVec2(frame_bb.Min.x, frame_bb.Min.y + frame_bb.GetHeight() * 0.5f);
-        const ImVec2 zero_b = ImVec2(frame_bb.Max.x, zero_a.y);
-        ImGui::GetWindowDrawList()->AddLine(zero_a, zero_b, IM_COL32(0, 200, 255, 90));
-        draw_lines(frame_bb, diffLine.GetData(), diffLine.GetSize() / 2, IM_COL32(0, 200, 255, 230), 0, 1);
-    }
 
     if (gScaleBufferX != nullptr)
         draw_frequency_scale(frame_bb, gScaleBufferX, gConfig.frequency_axis_scale);
@@ -3614,15 +2711,6 @@ void draw_spectrum(const ImRect &frame_bb)
 void render_main_screen()
 {
     draw_toolbar();
-
-    if (gComparePopupOpen)
-    {
-        gComparePopupOpen = false;
-        set_settings_page(SettingsPage::None);
-        ImGui::OpenPopup(ui_text("Compare Menu###compare_menu", "对比菜单###compare_menu"));
-    }
-    draw_hold_popup();
-    draw_file_browser_popup();
 
     clear_frequency_gesture_frame();
     const float total_height = ImGui::GetContentRegionAvail().y;
@@ -3779,28 +2867,6 @@ void Spectrogrammer_Shutdown()
 
 bool Spectrogrammer_MainLoopStep()
 {
-    // Session lifecycle housekeeping on the UI thread.
-    if (gFilePlaybackFinished.exchange(false) && gAnalysisSource == AnalysisSource::File)
-    {
-        // Keep the last rendered frame on screen; stop the finished session
-        // so the feeder thread is released.
-        stop_processing_session();
-    }
-    if (gSessionStalled.exchange(false))
-    {
-        if (gAnalysisSource == AnalysisSource::File && FileAudio_atEnd())
-        {
-            // Finished files drain and then go quiet; that is not a stall.
-            gFilePlaybackFinished.store(true);
-        }
-        else
-        {
-            // The input pipeline wedged (e.g. recorder stopped re-arming);
-            // restarting the session recovers it.
-            restart_processing_session();
-        }
-    }
-
     ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoTitleBar |
                                     ImGuiWindowFlags_NoMove |
                                     ImGuiWindowFlags_NoResize |

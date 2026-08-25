@@ -1,4 +1,4 @@
-/*
+/* 
   A Minimal Capture Program
 
   This program opens an audio interface for capture, configures it for
@@ -17,13 +17,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <errno.h>
 #include <alsa/asoundlib.h>
 #define LOGW printf
 #include "buf_manager.h"
 
 static AudioQueue *freeQueue_;
-static AudioQueue *recQueue_;
+static AudioQueue *recQueue_; 
 
 #define BUF_COUNT 64
 static uint32_t bufCount_ = BUF_COUNT;
@@ -31,43 +30,9 @@ static sample_buf *bufs_;
 static int32_t buffer_frames = 1024;
 static snd_pcm_t *capture_handle;
 static snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
-static volatile bool recording = false;
+static bool recording = false;
 static pthread_t debug_capture_thread;
-static bool capture_thread_started = false;
 static int input_channels_ = 1;
-
-static void Audio_releaseAll()
-{
-    recording = false;
-    if (capture_thread_started)
-    {
-        void *retval;
-        pthread_join(debug_capture_thread, &retval);
-        capture_thread_started = false;
-    }
-
-    if (capture_handle != nullptr)
-    {
-        snd_pcm_close(capture_handle);
-        capture_handle = nullptr;
-    }
-
-    if (recQueue_ != nullptr)
-    {
-        delete recQueue_;
-        recQueue_ = nullptr;
-    }
-    if (freeQueue_ != nullptr)
-    {
-        delete freeQueue_;
-        freeQueue_ = nullptr;
-    }
-    if (bufs_ != nullptr)
-    {
-        releaseSampleBufs(bufs_, bufCount_);
-        bufs_ = nullptr;
-    }
-}
 
 bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset, int inputChannels)
 {
@@ -78,80 +43,62 @@ bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset, 
     const char *device_name = "default";
     input_channels_ = inputChannels <= 1 ? 1 : 2;
 
-    // Idempotent: never leak a previous engine.
-    Audio_releaseAll();
-
-    if ((err = snd_pcm_open(&capture_handle, device_name, SND_PCM_STREAM_CAPTURE, 0)) < 0)
+    if ((err = snd_pcm_open (&capture_handle, device_name, SND_PCM_STREAM_CAPTURE, 0)) < 0) 
     {
-        fprintf(stderr, "cannot open audio device %s (%s)\n",
-                device_name,
-                snd_strerror(err));
-        capture_handle = nullptr;
+        fprintf (stderr, "cannot open audio device %s (%s)\n", 
+                    device_name,
+                    snd_strerror (err));
         return false;
     }
 
-    if ((err = snd_pcm_hw_params_malloc(&hw_params)) < 0)
+    if ((err = snd_pcm_hw_params_malloc (&hw_params)) < 0) 
     {
-        fprintf(stderr, "cannot allocate hardware parameter structure (%s)\n", snd_strerror(err));
-        Audio_releaseAll();
+        fprintf (stderr, "cannot allocate hardware parameter structure (%s)\n", snd_strerror (err));
         return false;
     }
 
-    if ((err = snd_pcm_hw_params_any(capture_handle, hw_params)) < 0)
+    if ((err = snd_pcm_hw_params_any (capture_handle, hw_params)) < 0) 
     {
-        fprintf(stderr, "cannot initialize hardware parameter structure (%s)\n",
-                snd_strerror(err));
-        snd_pcm_hw_params_free(hw_params);
-        Audio_releaseAll();
+        fprintf (stderr, "cannot initialize hardware parameter structure (%s)\n",
+                    snd_strerror (err));
         return false;
     }
 
-    if ((err = snd_pcm_hw_params_set_access(capture_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
+    if ((err = snd_pcm_hw_params_set_access (capture_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) 
     {
-        fprintf(stderr, "cannot set access type (%s)\n", snd_strerror(err));
-        snd_pcm_hw_params_free(hw_params);
-        Audio_releaseAll();
+        fprintf (stderr, "cannot set access type (%s)\n", snd_strerror (err));
         return false;
     }
 
-    if ((err = snd_pcm_hw_params_set_format(capture_handle, hw_params, format)) < 0)
+    if ((err = snd_pcm_hw_params_set_format (capture_handle, hw_params, format)) < 0) 
     {
-        fprintf(stderr, "cannot set sample format (%s)\n", snd_strerror(err));
-        snd_pcm_hw_params_free(hw_params);
-        Audio_releaseAll();
+        fprintf (stderr, "cannot set sample format (%s)\n", snd_strerror (err));
         return false;
     }
 
-    if ((err = snd_pcm_hw_params_set_rate_near(capture_handle, hw_params, &rate, 0)) < 0)
+    if ((err = snd_pcm_hw_params_set_rate_near (capture_handle, hw_params, &rate, 0)) < 0) 
     {
-        fprintf(stderr, "cannot set sample rate (%s)\n", snd_strerror(err));
-        snd_pcm_hw_params_free(hw_params);
-        Audio_releaseAll();
+        fprintf (stderr, "cannot set sample rate (%s)\n", snd_strerror (err));
         return false;
     }
 
-    if ((err = snd_pcm_hw_params_set_channels(capture_handle, hw_params, input_channels_)) < 0)
+    if ((err = snd_pcm_hw_params_set_channels (capture_handle, hw_params, input_channels_)) < 0)
     {
-        fprintf(stderr, "cannot set channel count (%s)\n", snd_strerror(err));
-        snd_pcm_hw_params_free(hw_params);
-        Audio_releaseAll();
+        fprintf (stderr, "cannot set channel count (%s)\n", snd_strerror (err));
         return false;
     }
 
-    if ((err = snd_pcm_hw_params(capture_handle, hw_params)) < 0)
+    if ((err = snd_pcm_hw_params (capture_handle, hw_params)) < 0) 
     {
-        fprintf(stderr, "cannot set parameters (%s)\n", snd_strerror(err));
-        snd_pcm_hw_params_free(hw_params);
-        Audio_releaseAll();
+        fprintf (stderr, "cannot set parameters (%s)\n", snd_strerror (err));
         return false;
     }
 
-    snd_pcm_hw_params_free(hw_params);
+    snd_pcm_hw_params_free (hw_params);
 
-    if ((err = snd_pcm_prepare(capture_handle)) < 0)
+    if ((err = snd_pcm_prepare (capture_handle)) < 0) 
     {
-        fprintf(stderr, "cannot prepare audio interface for use (%s)\n", snd_strerror(err));
-        Audio_releaseAll();
+        fprintf (stderr, "cannot prepare audio interface for use (%s)\n", snd_strerror (err));
         return false;
     }
 
@@ -159,22 +106,12 @@ bool Audio_init(unsigned int sampleRate, int framesPerBuf, int recordingPreset, 
     uint32_t bufSize = buffer_frames * input_channels_ * 16;
     bufSize = (bufSize + 7) >> 3;  // bits --> byte
     bufs_ = allocateSampleBufs(bufCount_, bufSize);
-    if (bufs_ == nullptr)
-    {
-        fprintf(stderr, "cannot allocate sample buffers\n");
-        Audio_releaseAll();
-        return false;
-    }
+    assert(bufs_);
 
     freeQueue_ = new AudioQueue(bufCount_);
     recQueue_ = new AudioQueue(bufCount_);
-    if (freeQueue_ == nullptr || recQueue_ == nullptr)
-    {
-        fprintf(stderr, "cannot allocate queues\n");
-        Audio_releaseAll();
-        return false;
-    }
-    for (uint32_t i = 0; i < bufCount_; i++)
+    assert(freeQueue_ && recQueue_);
+    for (uint32_t i = 0; i < bufCount_; i++) 
     {
         freeQueue_->push(&bufs_[i]);
     }
@@ -194,30 +131,20 @@ int Audio_getInputChannelCount()
 
 static void * debug_capture_thread_fn( void * v )
 {
-    (void)v;
     int err;
     while (recording)
     {
-        sample_buf *buf;
-        if (freeQueue_->front(&buf))
+        sample_buf *bufs_;
+        if (freeQueue_->front(&bufs_))
         {
             freeQueue_->pop();
 
-            if ((err = snd_pcm_readi(capture_handle, buf->buf_, buffer_frames)) != buffer_frames)
+            if ((err = snd_pcm_readi (capture_handle, bufs_->buf_, buffer_frames)) != buffer_frames) 
             {
-                if (err == -EPIPE)
-                {
-                    // XRUN: the consumer was too slow; recover and keep
-                    // capturing instead of silently stopping the session.
-                    snd_pcm_prepare(capture_handle);
-                    continue;
-                }
-                if (err == -EAGAIN)
-                    continue;
-                fprintf(stderr, "read from audio interface failed (%s)\n", snd_strerror(err));
+                fprintf (stderr, "read from audio interface failed (%s)\n", snd_strerror (err));
                 break;
             }
-            recQueue_->push(buf);
+            recQueue_->push(bufs_);
         }
     }
 
@@ -226,23 +153,23 @@ static void * debug_capture_thread_fn( void * v )
 
 bool Audio_startPlay()
 {
-    if (capture_handle == nullptr || freeQueue_ == nullptr || recQueue_ == nullptr)
-        return false;
-    recording = true;
-    int err = pthread_create(&debug_capture_thread, NULL, debug_capture_thread_fn, NULL);
-    if (err != 0)
-    {
-        recording = false;
-        fprintf(stderr, "pthread_create failed (%s)\n", strerror(err));
-        return false;
-    }
-    capture_thread_started = true;
+    recording = true;    
+    pthread_create(&debug_capture_thread, NULL, debug_capture_thread_fn, NULL);
     return true;
 }
 
 void Audio_deinit()
 {
-    Audio_releaseAll();
+    recording = false;
+    void *retval;
+    pthread_join(debug_capture_thread, &retval);
+
+    snd_pcm_close (capture_handle);
+
+    delete recQueue_;
+    delete freeQueue_;
+    releaseSampleBufs(bufs_, bufCount_);
+
     fprintf(stdout, "audio interface closed\n");
 }
 #endif

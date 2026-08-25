@@ -17,6 +17,10 @@
 #ifndef NATIVE_AUDIO_AUDIO_COMMON_H
 #define NATIVE_AUDIO_AUDIO_COMMON_H
 
+#include <SLES/OpenSLES.h>
+#include <SLES/OpenSLES_Android.h>
+
+#include "android_debug.h"
 #include "debug_utils.h"
 #include "buf_manager.h"
 
@@ -40,7 +44,23 @@ struct SampleFormat {
   uint16_t pcmFormat_;  // 8 bit, 16 bit, 24 bit ...
   uint32_t representation_;  // android extensions
 };
+extern void ConvertToSLSampleFormat(SLAndroidDataFormat_PCM_EX* pFormat, SampleFormat* format);
 
+/*
+ * GetSystemTicks(void):  return the time in micro sec
+ */
+__inline__ uint64_t GetSystemTicks() {
+  struct timeval Time;
+  gettimeofday(&Time, NULL);
+
+  return (static_cast<uint64_t>(1000000) * Time.tv_sec + Time.tv_usec);
+}
+
+#define SLASSERT(x)                   \
+  do {                                \
+    assert(SL_RESULT_SUCCESS == (x)); \
+    (void)(x);                        \
+  } while (0)
 
 /*
  * Interface for player and recorder to communicate with engine
