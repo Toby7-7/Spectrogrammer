@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Spectrogrammer</string>
+    <string name="app_name">Spectrogrammer-PR1</string>
     <string name="lib_name">Spectrogrammer</string>
-    <string name="package_name">org.nanoorg.Spectrogrammer</string>
+    <string name="package_name">org.nanoorg.spectrogrammer.pr1</string>
 </resources>
 

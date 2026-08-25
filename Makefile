@@ -22,9 +22,9 @@ SRC_DIR?=./src
 KISSFFT_PKGCONFIG:=libs/$(ARCH)/kissfft/lib64/pkgconfig/kissfft-float.pc
 
 ifeq ($(BUILD_ANDROID),y)
-LABEL?=频谱仪
-APKFILE?=$(APPNAME).apk
-PACKAGENAME?=org.nanoorg.$(APPNAME)
+LABEL?=频谱仪-PR1
+APKFILE?=Spectrogrammer-PR1.apk
+PACKAGENAME?=org.nanoorg.spectrogrammer.pr1
 SRC=$(SRC_DIR)/main_android.cpp $(SRC_DIR)/android_native_app_glue.c
 SRC+=$(SRC_DIR)/audio/audio_main.cpp
 SRC+=$(SRC_DIR)/audio/audio_recorder.cpp

@@ -133,7 +133,7 @@ extern "C" void android_main(struct android_app* app)
         struct android_poll_source* out_data;
 
         // Poll all events. If the app is not visible, this loop blocks until a window is ready.
-        while (ALooper_pollAll(g_WindowInitialized ? 0 : -1, nullptr, &out_events, (void**)&out_data) >= 0)
+        while (ALooper_pollOnce(g_WindowInitialized ? 0 : -1, nullptr, &out_events, (void**)&out_data) >= 0)
         {
             // Process one event
             if (out_data != nullptr)
@@ -744,7 +744,7 @@ static jobject BuildForegroundServiceIntent(JNIEnv *env, jobject nativeActivity)
         intentClass, "setClassName",
         "(Landroid/content/Context;Ljava/lang/String;)Landroid/content/Intent;");
     jmethodID putExtraMethod = env->GetMethodID(intentClass, "putExtra", "(Ljava/lang/String;Z)Landroid/content/Intent;");
-    jstring className = env->NewStringUTF("org.nanoorg.Spectrogrammer.CaptureForegroundService");
+    jstring className = env->NewStringUTF("org.nanoorg.spectrogrammer.pr1.CaptureForegroundService");
     env->CallObjectMethod(intent, setClassNameMethod, nativeActivity, className);
     jstring languageExtraKey = env->NewStringUTF("use_chinese_ui");
     env->CallObjectMethod(intent, putExtraMethod, languageExtraKey, Spectrogrammer_UseChineseUi() ? JNI_TRUE : JNI_FALSE);
