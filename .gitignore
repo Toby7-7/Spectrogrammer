@@ -3,6 +3,7 @@
 *.map
 *.idsig
 *.arsc
+*.dex
 AndroidManifest.xml
 *.keystore
 *.jks
@@ -14,7 +15,16 @@ out/
 obj/
 libs/
 build/
+makecapk/classes.dex
+makecapk/resources.arsc
+temp.apk
 **/lib/
 **/arm64-v8a/
 *.a
 
+# IDE & Editor files
+.vscode/
+.idea/
+*.suo
+*.user
+GEMINI.md

@@ -116,7 +116,7 @@ CFLAGS+= -I$(SRC_DIR) -I$(SRC_DIR)/app -I$(SRC_DIR)/audio
 CFLAGS+= -Isubmodules/kissfft -Isubmodules/imgui
 
 ifeq ($(BUILD_ANDROID),y)
-LDFLAGS += -landroid -lGLESv3 -lEGL  -llog -lOpenSLES -lz
+LDFLAGS += -landroid -lGLESv3 -lEGL  -llog -lOpenSLES -lz -lmediandk
 LDFLAGS += -shared -uANativeActivity_onCreate
 endif
 
