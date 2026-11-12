@@ -18,7 +18,6 @@
 #include "Spectrogrammer.h"
 #include "AppConfig.h"
 #include "colormaps.h"
-#include "ModalHoldPicker.h"
 #include "FilePicker.h"
 #include "image_export.h"
 
@@ -54,15 +53,23 @@ enum HOLDING_STATE
     HOLDING_STATE_READY = 2
 };
 
+enum class BaselineLearnState
+{
+    Idle = 0,
+    Sampling = 1,
+    Active = 2
+};
+
 enum class SettingsPage
 {
     None = 0,
     Home = 1,
     AudioInput = 2,
-    Analysis = 3,
-    SpectrumWaterfall = 4,
-    System = 5,
-    About = 6,
+    FFTAnalysis = 3,
+    Spectrum = 4,
+    Waterfall = 5,
+    ToolsAlarms = 6,
+    SystemAbout = 7,
 };
 
 struct PeakMarker
@@ -89,8 +96,10 @@ struct SharedState
     };
 
     ChannelState channels[2];
-    BufferIODouble reference_hold_raw;
-    BufferIODouble reference_hold_line;
+    BufferIODouble reference_hold_raw[2];
+    BufferIODouble reference_hold_line[2];
+    float reference_sample_rate = 0.0f;
+    uint32_t reference_fft_size = 0;
 };
 
 struct DisplayChannelState
@@ -159,7 +168,6 @@ bool gSettingsScrollTracking = false;
 bool gSettingsScrollDragging = false;
 ImVec2 gSettingsScrollStartMousePos = ImVec2(0.0f, 0.0f);
 float gSettingsScrollStartY = 0.0f;
-bool gCloseHoldPopupRequested = false;
 PinchGestureState gPinchGesture;
 
 ImRect gFrequencyGestureFrame;
@@ -176,8 +184,7 @@ BufferIODouble gScaledPowerY[kMaxInputChannels];
 BufferIODouble gScaledPowerXY[kMaxInputChannels];
 BufferIODouble gPeakScaledPowerY[kMaxInputChannels];
 BufferIODouble gPeakScaledPowerXY[kMaxInputChannels];
-BufferIODouble gReferenceScaledPowerY;
-BufferIODouble gReferenceScaledPowerXY;
+BufferIODouble gReferenceScaledPowerY[kMaxInputChannels];
 
 #ifdef ANDROID
 android_app *gAndroidApp = nullptr;
@@ -201,13 +208,21 @@ std::atomic<bool> gAlarmTriggered{false};
 bool gAlarmArmed = false;
 bool gCursorPinned = false;
 bool gFileBrowserOpen = false;
-bool gComparePopupOpen = false;
+BaselineLearnState gBaselineState = BaselineLearnState::Idle;
+std::vector<std::vector<float>> gCapturedFrames[kMaxInputChannels];
+std::chrono::steady_clock::time_point gSamplingStartTime;
+std::string gBaselineTip;
+std::chrono::steady_clock::time_point gBaselineTipExpiry;
+static ImRect gBaselinePillTouchRect = ImRect(0, 0, 0, 0);
 float gLevelDb[kMaxInputChannels] = {-120.0f, -120.0f};
 std::string gExportStatus;
+float gCursorRefDb[kMaxInputChannels] = {-120.0f, -120.0f};
+bool gCursorRefValid[kMaxInputChannels] = {false, false};
 std::vector<float> gAveragePower[kMaxInputChannels];
 bool gAverageValid[kMaxInputChannels] = {false, false};
-BufferIODouble gDiffScaledPowerY;
-BufferIODouble gDiffLine;
+BufferIODouble gDiffScaledPowerY[kMaxInputChannels];
+BufferIODouble gDiffLine[kMaxInputChannels];
+BufferIODouble gDiffScaledPowerXY[kMaxInputChannels];
 
 // Snapshot of the config values the processing thread needs.  Copied from
 // gConfig (under gStateMutex) on every processed frame, so UI-thread edits
@@ -357,6 +372,78 @@ void alarm_vibrate()
 }
 #endif
 
+void restart_processing_session();
+
+#ifdef ANDROID
+void launch_system_file_picker()
+{
+    if (gAndroidApp == nullptr || gAndroidApp->activity == nullptr || gAndroidApp->activity->vm == nullptr)
+        return;
+
+    JNIEnv *env = nullptr;
+    JavaVM *vm = gAndroidApp->activity->vm;
+    bool attached = false;
+    if (vm->GetEnv((void **)&env, JNI_VERSION_1_6) != JNI_OK)
+    {
+        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK)
+            return;
+        attached = true;
+    }
+
+    auto clear_exception = [&]()
+    {
+        if (env->ExceptionCheck())
+            env->ExceptionClear();
+    };
+
+    jobject activityObj = gAndroidApp->activity->clazz;
+    if (activityObj != nullptr)
+    {
+        jclass actCls = env->GetObjectClass(activityObj);
+        if (!env->ExceptionCheck() && actCls != nullptr)
+        {
+            jmethodID launchMethod = env->GetMethodID(actCls, "launchAudioFilePicker", "()V");
+            if (!env->ExceptionCheck() && launchMethod != nullptr)
+            {
+                env->CallVoidMethod(activityObj, launchMethod);
+            }
+            env->DeleteLocalRef(actCls);
+        }
+    }
+    clear_exception();
+    if (attached)
+        vm->DetachCurrentThread();
+}
+
+static std::mutex gPendingFileMutex;
+static std::string gPendingFilePath;
+static std::atomic<bool> gHasPendingFile{false};
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_nanoorg_spectrogrammer_pr1_SpectrogrammerActivity_nativeOnAudioFileSelected(
+    JNIEnv *env, jclass /*clazz*/, jstring filePath, jstring /*displayName*/)
+{
+    if (filePath == nullptr)
+        return;
+    const char *pathChars = env->GetStringUTFChars(filePath, nullptr);
+    if (pathChars == nullptr)
+        return;
+
+    std::string path(pathChars);
+    env->ReleaseStringUTFChars(filePath, pathChars);
+
+    {
+        std::lock_guard<std::mutex> lock(gPendingFileMutex);
+        gPendingFilePath = path;
+        gHasPendingFile.store(true);
+    }
+}
+#else
+void launch_system_file_picker()
+{
+}
+#endif
+
 constexpr int kDefaultAndroidSampleRate = 48000;
 constexpr int kAudioBufferLength = 1024;
 constexpr int kPeakMarkerCapacity = 5;
@@ -378,11 +465,6 @@ void refresh_display_state_locked(bool updateWaterfall);
 bool use_chinese_ui()
 {
     return gConfig.ui_language == UiLanguage::ChineseSimplified;
-}
-
-const char *ui_text(const char *english, const char *chinese)
-{
-    return use_chinese_ui() ? chinese : english;
 }
 
 const char *ui_language_label(UiLanguage language)
@@ -619,9 +701,9 @@ ImU32 display_channel_peak_color(int display_channel)
     if (!stereo_input_available())
         return IM_COL32(220, 64, 64, 220);
     if (display_mode_is_split())
-        return display_source_channel(display_channel) == mapped_left_source_channel() ? IM_COL32(220, 64, 64, 220) : IM_COL32(64, 160, 220, 220);
+        return display_source_channel(display_channel) == mapped_left_source_channel() ? IM_COL32(220, 64, 64, 220) : IM_COL32(255, 105, 180, 220);
     if (gConfig.input_channel_mode == InputChannelMode::Right)
-        return IM_COL32(64, 160, 220, 220);
+        return IM_COL32(255, 105, 180, 220);
     return IM_COL32(220, 64, 64, 220);
 }
 
@@ -1030,15 +1112,31 @@ void clear_peak_hold_locked(int channel = -1)
 
 void clear_reference_hold_locked()
 {
-    gSharedState.reference_hold_raw.Resize(0);
-    gSharedState.reference_hold_line.Resize(0);
+    for (int i = 0; i < kMaxInputChannels; i++)
+    {
+        gSharedState.reference_hold_raw[i].Resize(0);
+        gSharedState.reference_hold_line[i].Resize(0);
+        gDiffLine[i].Resize(0);
+        gDiffScaledPowerY[i].Resize(0);
+        gDiffScaledPowerXY[i].Resize(0);
+        gCapturedFrames[i].clear();
+        gCursorRefDb[i] = -120.0f;
+        gCursorRefValid[i] = false;
+    }
+    gSharedState.reference_sample_rate = 0.0f;
+    gSharedState.reference_fft_size = 0;
     gHoldingState = HOLDING_STATE_NO_HOLD;
+    gBaselineState = BaselineLearnState::Idle;
 }
 
 void update_cursor_db_locked()
 {
     for (int channel = 0; channel < kMaxInputChannels; channel++)
+    {
         gCursorDb[channel] = -120.0f;
+        gCursorRefDb[channel] = -120.0f;
+        gCursorRefValid[channel] = false;
+    }
 
     if (!gCursorActive || gProcessors[0] == nullptr)
         return;
@@ -1052,6 +1150,20 @@ void update_cursor_db_locked()
         int bin = static_cast<int>(roundf(gProcessors[0]->freq2Bin(gCursorFrequencyHz)));
         bin = std::max(1, std::min(bin, state.live_power_raw.GetSize() - 1));
         gCursorDb[channel] = power_to_db(state.live_power_raw.GetData()[bin]);
+
+        if (gHoldingState == HOLDING_STATE_READY && gSharedState.reference_hold_raw[channel].GetSize() > 0)
+        {
+            const float ref_res = (gSharedState.reference_fft_size > 0 && gSharedState.reference_sample_rate > 0.0f)
+                                      ? (gSharedState.reference_sample_rate / static_cast<float>(gSharedState.reference_fft_size))
+                                      : gProcessors[0]->bin2Freq(1);
+            if (ref_res > 0.0f)
+            {
+                int ref_bin = static_cast<int>(roundf(gCursorFrequencyHz / ref_res));
+                ref_bin = std::max(1, std::min(ref_bin, gSharedState.reference_hold_raw[channel].GetSize() - 1));
+                gCursorRefDb[channel] = power_to_db(gSharedState.reference_hold_raw[channel].GetData()[ref_bin]);
+                gCursorRefValid[channel] = true;
+            }
+        }
     }
 }
 
@@ -1086,6 +1198,24 @@ void generate_spectrum_lines_from_bin_data(BufferIODouble *pBins, BufferIODouble
     for (int bin = 1; bin < pBins->GetSize(); bin++)
     {
         pDataOut[2 * i + 0] = gScaleBufferX->FreqToX(gProcessors[0]->bin2Freq(bin));
+        pDataOut[2 * i + 1] = pDataIn[bin];
+        i++;
+    }
+}
+
+void generate_reference_lines_from_bin_data(BufferIODouble *pBins, BufferIODouble *pLines, float freq_resolution)
+{
+    if (pBins == nullptr || pLines == nullptr || gScaleBufferX == nullptr)
+        return;
+
+    float *pDataIn = pBins->GetData();
+    pLines->Resize(2 * (pBins->GetSize() - 1));
+    float *pDataOut = pLines->GetData();
+    int i = 0;
+    for (int bin = 1; bin < pBins->GetSize(); bin++)
+    {
+        const float freq = static_cast<float>(bin) * freq_resolution;
+        pDataOut[2 * i + 0] = gScaleBufferX->FreqToX(freq);
         pDataOut[2 * i + 1] = pDataIn[bin];
         i++;
     }
@@ -1170,6 +1300,110 @@ void update_peak_markers_locked(int channel)
     state.peak_marker_count = active_count;
 }
 
+bool compute_trimmed_mean_baseline(const std::vector<std::vector<float>> &frames, std::vector<float> &out_baseline)
+{
+    if (frames.empty())
+        return false;
+
+    const size_t num_frames = frames.size();
+    const size_t bin_count = frames[0].size();
+    if (bin_count == 0)
+        return false;
+
+    out_baseline.assign(bin_count, 0.0f);
+    std::vector<float> bin_db_values;
+    bin_db_values.reserve(num_frames);
+
+    for (size_t bin = 0; bin < bin_count; bin++)
+    {
+        bin_db_values.clear();
+        for (size_t f = 0; f < num_frames; f++)
+        {
+            if (bin < frames[f].size())
+            {
+                bin_db_values.push_back(power_to_db(frames[f][bin]));
+            }
+        }
+
+        if (bin_db_values.empty())
+            continue;
+
+        std::sort(bin_db_values.begin(), bin_db_values.end());
+
+        // Trim 15% spikes from top and bottom (at least 1 from each end if num_frames >= 5)
+        size_t trim_count = 0;
+        if (bin_db_values.size() >= 5)
+        {
+            trim_count = static_cast<size_t>(bin_db_values.size() * 0.15f);
+            if (trim_count == 0)
+                trim_count = 1;
+        }
+
+        const size_t start_idx = trim_count;
+        const size_t end_idx = bin_db_values.size() - trim_count;
+        float sum_db = 0.0f;
+        size_t count = 0;
+        for (size_t i = start_idx; i < end_idx; i++)
+        {
+            sum_db += bin_db_values[i];
+            count++;
+        }
+
+        const float avg_db = (count > 0) ? (sum_db / static_cast<float>(count)) : bin_db_values[bin_db_values.size() / 2];
+        out_baseline[bin] = db_to_power(avg_db);
+    }
+    return true;
+}
+
+bool compute_learned_baseline()
+{
+    std::vector<std::vector<float>> frames[kMaxInputChannels];
+    int active_channels = 1;
+    {
+        std::lock_guard<std::mutex> lock(gStateMutex);
+        active_channels = display_channel_count();
+        for (int ch = 0; ch < active_channels; ch++)
+        {
+            frames[ch] = std::move(gCapturedFrames[ch]);
+            gCapturedFrames[ch].clear();
+        }
+    }
+
+    if (frames[0].empty())
+        return false;
+
+    std::vector<float> baselines[kMaxInputChannels];
+    for (int ch = 0; ch < active_channels; ch++)
+    {
+        if (!compute_trimmed_mean_baseline(frames[ch], baselines[ch]))
+            return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gStateMutex);
+        for (int ch = 0; ch < kMaxInputChannels; ch++)
+        {
+            if (ch < active_channels && !baselines[ch].empty())
+            {
+                const size_t bin_count = baselines[ch].size();
+                gSharedState.reference_hold_raw[ch].Resize(static_cast<int>(bin_count));
+                memcpy(gSharedState.reference_hold_raw[ch].GetData(), baselines[ch].data(), bin_count * sizeof(float));
+            }
+            else
+            {
+                gSharedState.reference_hold_raw[ch].Resize(0);
+                gSharedState.reference_hold_line[ch].Resize(0);
+            }
+        }
+        gSharedState.reference_sample_rate = gEffectiveSampleRate;
+        gSharedState.reference_fft_size = static_cast<uint32_t>(gConfig.fft_size);
+        gHoldingState = HOLDING_STATE_READY;
+        gConfig.baseline_diff_enabled = true;
+        refresh_display_state_locked(false);
+    }
+    return true;
+}
+
 void refresh_display_state_locked(bool updateWaterfall)
 {
     if (gProcessors[0] == nullptr || gScaleBufferX == nullptr)
@@ -1199,39 +1433,80 @@ void refresh_display_state_locked(bool updateWaterfall)
         update_peak_markers_locked(channel);
     }
 
-    if (gHoldingState == HOLDING_STATE_READY && gSharedState.reference_hold_raw.GetSize() > 0)
+    for (int channel = 0; channel < display_channel_count(); channel++)
     {
-        applyScaleY(&gSharedState.reference_hold_raw, gAxisYMin, gAxisYMax, true, &gReferenceScaledPowerY);
-        generate_spectrum_lines_from_bin_data(&gReferenceScaledPowerY, &gSharedState.reference_hold_line);
-    }
-    else
-    {
-        gSharedState.reference_hold_line.Resize(0);
-    }
-
-    // Optional (current - reference) difference curve.  0 dB sits at the
-    // vertical center; +/-60 dB maps to the top/bottom edges.
-    if (gConfig.baseline_diff_enabled &&
-        gDisplayChannelCount > 0 &&
-        display_channel_state(0).live_power_raw.GetSize() > 1 &&
-        display_channel_state(0).live_power_raw.GetSize() == gSharedState.reference_hold_raw.GetSize())
-    {
-        const float *live = display_channel_state(0).live_power_raw.GetData();
-        const float *ref = gSharedState.reference_hold_raw.GetData();
-        const int n = gSharedState.reference_hold_raw.GetSize();
-        gDiffScaledPowerY.Resize(n);
-        float *diff = gDiffScaledPowerY.GetData();
-        for (int i = 0; i < n; i++)
+        if (gHoldingState == HOLDING_STATE_READY && gSharedState.reference_hold_raw[channel].GetSize() > 0)
         {
-            const float diff_db = power_to_db(live[i]) - power_to_db(ref[i]);
-            diff[i] = 0.5f + 0.5f * clamp(diff_db / 60.0f, -1.0f, 1.0f);
+            applyScaleY(&gSharedState.reference_hold_raw[channel], gAxisYMin, gAxisYMax, true, &gReferenceScaledPowerY[channel]);
+            const float ref_res = (gSharedState.reference_fft_size > 0 && gSharedState.reference_sample_rate > 0.0f)
+                                      ? (gSharedState.reference_sample_rate / static_cast<float>(gSharedState.reference_fft_size))
+                                      : gProcessors[0]->bin2Freq(1);
+            generate_reference_lines_from_bin_data(&gReferenceScaledPowerY[channel], &gSharedState.reference_hold_line[channel], ref_res);
         }
-        generate_spectrum_lines_from_bin_data(&gDiffScaledPowerY, &gDiffLine);
-    }
-    else
-    {
-        gDiffScaledPowerY.Resize(0);
-        gDiffLine.Resize(0);
+        else
+        {
+            gSharedState.reference_hold_line[channel].Resize(0);
+        }
+
+        // Baseline difference mode per channel: 0 dB sits at vertical center; +/-30 dB maps to top/bottom edges.
+        const bool baseline_ready = (gHoldingState == HOLDING_STATE_READY && gSharedState.reference_hold_raw[channel].GetSize() > 1);
+        const bool is_diff_active = (gConfig.baseline_diff_enabled &&
+                                     baseline_ready &&
+                                     display_channel_state(channel).live_power_raw.GetSize() > 1 &&
+                                     gProcessors[0] != nullptr);
+
+        if (is_diff_active)
+        {
+            const float *live = display_channel_state(channel).live_power_raw.GetData();
+            const int n_live = display_channel_state(channel).live_power_raw.GetSize();
+            const float *ref = gSharedState.reference_hold_raw[channel].GetData();
+            const int n_ref = gSharedState.reference_hold_raw[channel].GetSize();
+            gDiffScaledPowerY[channel].Resize(n_live);
+            float *diff = gDiffScaledPowerY[channel].GetData();
+
+            const float live_res = gProcessors[0]->bin2Freq(1);
+            const float ref_res = (gSharedState.reference_fft_size > 0 && gSharedState.reference_sample_rate > 0.0f)
+                                      ? (gSharedState.reference_sample_rate / static_cast<float>(gSharedState.reference_fft_size))
+                                      : live_res;
+
+            for (int i = 0; i < n_live; i++)
+            {
+                float ref_power = 0.0f;
+                if (n_live == n_ref && std::abs(live_res - ref_res) < 1e-3f)
+                {
+                    ref_power = ref[i];
+                }
+                else
+                {
+                    const float freq = static_cast<float>(i) * live_res;
+                    const float ref_bin_f = ref_res > 0.0f ? (freq / ref_res) : 0.0f;
+                    const int b0 = static_cast<int>(ref_bin_f);
+                    const int b1 = b0 + 1;
+                    if (b0 < 0)
+                    {
+                        ref_power = ref[0];
+                    }
+                    else if (b1 >= n_ref)
+                    {
+                        ref_power = (b0 < n_ref) ? ref[b0] : ref[n_ref - 1];
+                    }
+                    else
+                    {
+                        const float frac = ref_bin_f - static_cast<float>(b0);
+                        ref_power = ref[b0] * (1.0f - frac) + ref[b1] * frac;
+                    }
+                }
+                const float diff_db = power_to_db(live[i]) - power_to_db(ref_power);
+                // Normalized: 0.5 is 0 dB, 1.0 is +30 dB, 0.0 is -30 dB
+                diff[i] = 0.5f + 0.5f * clamp(diff_db / 30.0f, -1.0f, 1.0f);
+            }
+            generate_spectrum_lines_from_bin_data(&gDiffScaledPowerY[channel], &gDiffLine[channel]);
+        }
+        else
+        {
+            gDiffScaledPowerY[channel].Resize(0);
+            gDiffLine[channel].Resize(0);
+        }
     }
 
     update_cursor_db_locked();
@@ -1242,8 +1517,16 @@ void refresh_display_state_locked(bool updateWaterfall)
         {
             if (gWaterfallWidth[channel] <= 0)
                 continue;
-            gScaleBufferX->Build(&gScaledPowerY[channel], &gScaledPowerXY[channel]);
-            Draw_update(channel, gScaledPowerXY[channel].GetData(), gScaledPowerXY[channel].GetSize());
+            if (gConfig.baseline_diff_enabled && gDiffScaledPowerY[channel].GetSize() > 0)
+            {
+                gScaleBufferX->Build(&gDiffScaledPowerY[channel], &gDiffScaledPowerXY[channel]);
+                Draw_update_diff(channel, gDiffScaledPowerXY[channel].GetData(), gDiffScaledPowerXY[channel].GetSize());
+            }
+            else
+            {
+                gScaleBufferX->Build(&gScaledPowerY[channel], &gScaledPowerXY[channel]);
+                Draw_update(channel, gScaledPowerXY[channel].GetData(), gScaledPowerXY[channel].GetSize());
+            }
         }
     }
 }
@@ -1304,18 +1587,22 @@ void update_alarm_locked(const ProcParams &p)
         gAlarmTriggered.store(false);
         return;
     }
-    if (gProcessors[0] == nullptr)
-        return;
-
-    const BufferIODouble *power = gProcessors[0]->getBufferIO();
-    const float *data = power->GetData();
-    const int bin_min = std::max(1, (int)floorf(gProcessors[0]->freq2Bin(p.alarmFreqMin)));
-    const float max_freq = p.alarmFreqMax > 0.0f ? p.alarmFreqMax : gMaxFreq;
-    const int bin_max = std::min(power->GetSize() - 1, (int)ceilf(gProcessors[0]->freq2Bin(max_freq)));
 
     float peak_db = -200.0f;
-    for (int bin = bin_min; bin <= bin_max; bin++)
-        peak_db = std::max(peak_db, power_to_db(data[bin]));
+    for (int ch = 0; ch < p.processingChannels; ch++)
+    {
+        if (gProcessors[ch] == nullptr)
+            continue;
+
+        const BufferIODouble *power = gProcessors[ch]->getBufferIO();
+        const float *data = power->GetData();
+        const int bin_min = std::max(1, (int)floorf(gProcessors[ch]->freq2Bin(p.alarmFreqMin)));
+        const float max_freq = p.alarmFreqMax > 0.0f ? p.alarmFreqMax : gMaxFreq;
+        const int bin_max = std::min(power->GetSize() - 1, (int)ceilf(gProcessors[ch]->freq2Bin(max_freq)));
+
+        for (int bin = bin_min; bin <= bin_max; bin++)
+            peak_db = std::max(peak_db, power_to_db(data[bin]));
+    }
 
     if (!gAlarmArmed)
     {
@@ -1487,8 +1774,18 @@ void start_processing_session()
     gAverageValid[1] = false;
     gAveragePower[0].clear();
     gAveragePower[1].clear();
-    gDiffLine.Resize(0);
-    gDiffScaledPowerY.Resize(0);
+    for (int i = 0; i < kMaxInputChannels; i++)
+    {
+        gDiffLine[i].Resize(0);
+        gDiffScaledPowerY[i].Resize(0);
+        gDiffScaledPowerXY[i].Resize(0);
+    }
+    if (gBaselineState == BaselineLearnState::Sampling)
+    {
+        gBaselineState = BaselineLearnState::Idle;
+        for (int i = 0; i < kMaxInputChannels; i++)
+            gCapturedFrames[i].clear();
+    }
 
     bool audio_started = false;
     AudioQueue *pFreeQueue = nullptr;
@@ -1505,6 +1802,13 @@ void start_processing_session()
         gFileSessionStartFrame = gFileSeekFrame;
 
         if (gFileAudioPath.empty() || !FileAudio_init(gFileAudioPath.c_str(), kAudioBufferLength, gFileSeekFrame))
+        {
+            gFileLoadFailed = true;
+            gFileErrorText = FileAudio_errorText();
+            return;
+        }
+
+        if (!FileAudio_startPlay())
         {
             gFileLoadFailed = true;
             gFileErrorText = FileAudio_errorText();
@@ -1709,7 +2013,6 @@ void load_config_if_needed(void *window)
         SaveAppConfig(gConfigPath.c_str(), gConfig);
 
     gConfigLoaded = true;
-    RefreshFiles(gWorkingDirectory.c_str());
 }
 
 void save_config_if_needed()
@@ -1737,17 +2040,6 @@ void apply_display_change(bool rebuildScale, bool clearWaterfall)
         rebuild_scale_if_ready_locked();
     if (clearWaterfall)
         Reset_waterfall_storage();
-    refresh_display_state_locked(false);
-}
-
-void copy_current_to_reference()
-{
-    std::lock_guard<std::mutex> lock(gStateMutex);
-    if (display_channel_state(0).live_power_raw.GetSize() == 0)
-        return;
-
-    gSharedState.reference_hold_raw.copy(&display_channel_state(0).live_power_raw);
-    gHoldingState = HOLDING_STATE_READY;
     refresh_display_state_locked(false);
 }
 
@@ -1895,22 +2187,26 @@ const char *fft_size_label(const AppConfig &config)
 const char *decimations_label(const AppConfig &config)
 {
     static char buffer[96];
-    if (use_chinese_ui())
-        snprintf(
-            buffer,
-            sizeof(buffer),
-            "%d（上限 %.1f kHz，%.1f Hz/bin）",
-            config.decimations,
-            GetEffectiveSampleRate(config) * 0.5f / 1000.0f,
-            GetEffectiveSampleRate(config) / (float)config.fft_size);
+    if (config.decimations == 0)
+    {
+        if (use_chinese_ui())
+            snprintf(buffer, sizeof(buffer), "0（关闭 · 48k 全频, %.1f Hz/bin）",
+                     (float)config.sample_rate_hz / (float)config.fft_size);
+        else
+            snprintf(buffer, sizeof(buffer), "0 (Off · 48k full, %.1f Hz/bin)",
+                     (float)config.sample_rate_hz / (float)config.fft_size);
+    }
     else
-        snprintf(
-            buffer,
-            sizeof(buffer),
-            "%d (limit %.1f kHz, %.1f Hz/bin)",
-            config.decimations,
-            GetEffectiveSampleRate(config) * 0.5f / 1000.0f,
-            GetEffectiveSampleRate(config) / (float)config.fft_size);
+    {
+        const int factor = 1 << config.decimations;
+        const float res = GetEffectiveSampleRate(config) / (float)config.fft_size;
+        if (use_chinese_ui())
+            snprintf(buffer, sizeof(buffer), "%d（%d× 低频细化 · 保留全频, %.1f Hz/bin）",
+                     config.decimations, factor, res);
+        else
+            snprintf(buffer, sizeof(buffer), "%d (%dx low-freq · full band kept, %.1f Hz/bin)",
+                     config.decimations, factor, res);
+    }
     return buffer;
 }
 
@@ -1974,14 +2270,16 @@ const char *settings_page_title(SettingsPage page)
     {
     case SettingsPage::AudioInput:
         return ui_text("Audio Input", "音频输入");
-    case SettingsPage::Analysis:
-        return ui_text("Analysis", "分析处理");
-    case SettingsPage::SpectrumWaterfall:
-        return ui_text("Spectrum & Waterfall", "频谱与瀑布");
-    case SettingsPage::System:
-        return ui_text("System", "系统");
-    case SettingsPage::About:
-        return ui_text("About", "关于");
+    case SettingsPage::FFTAnalysis:
+        return ui_text("FFT & Processing", "FFT 与平滑");
+    case SettingsPage::Spectrum:
+        return ui_text("Spectrum & Peaks", "频谱与测量");
+    case SettingsPage::Waterfall:
+        return ui_text("Waterfall", "瀑布图");
+    case SettingsPage::ToolsAlarms:
+        return ui_text("Tools & Alarms", "报警与工具");
+    case SettingsPage::SystemAbout:
+        return ui_text("System & About", "系统与关于");
     case SettingsPage::Home:
     case SettingsPage::None:
     default:
@@ -1997,14 +2295,16 @@ const char *settings_page_window_id(SettingsPage page)
         return "settings_home";
     case SettingsPage::AudioInput:
         return "settings_audio_input";
-    case SettingsPage::Analysis:
-        return "settings_analysis";
-    case SettingsPage::SpectrumWaterfall:
-        return "settings_spectrum_waterfall";
-    case SettingsPage::System:
-        return "settings_system";
-    case SettingsPage::About:
-        return "settings_about";
+    case SettingsPage::FFTAnalysis:
+        return "settings_fft_processing";
+    case SettingsPage::Spectrum:
+        return "settings_spectrum";
+    case SettingsPage::Waterfall:
+        return "settings_waterfall";
+    case SettingsPage::ToolsAlarms:
+        return "settings_tools_alarms";
+    case SettingsPage::SystemAbout:
+        return "settings_system_about";
     case SettingsPage::None:
     default:
         return "settings";
@@ -2013,14 +2313,16 @@ const char *settings_page_window_id(SettingsPage page)
 
 SettingsPage settings_back_target(SettingsPage page)
 {
-    if (page == SettingsPage::Home)
+    if (page == SettingsPage::Home || page == SettingsPage::None)
         return SettingsPage::None;
     return SettingsPage::Home;
 }
 
 const char *settings_back_label(SettingsPage page)
 {
-    return page == SettingsPage::Home ? ui_text("Back to main view", "返回主界面") : ui_text("Back to settings", "返回设置");
+    if (page == SettingsPage::Home)
+        return ui_text("Back to main view", "返回主界面");
+    return ui_text("Back to settings", "返回设置");
 }
 
 const char *enabled_state_label(bool enabled)
@@ -2080,15 +2382,6 @@ bool render_settings_header_button(const char *id, const char *label)
     return pressed;
 }
 
-const char *display_visibility_summary_label()
-{
-    if (gConfig.show_spectrum && gConfig.show_waterfall)
-        return ui_text("Spectrum + waterfall", "频谱+瀑布");
-    if (gConfig.show_spectrum)
-        return ui_text("Spectrum only", "仅频谱");
-    return ui_text("Waterfall only", "仅瀑布");
-}
-
 void format_settings_page_summary(SettingsPage page, char *buffer, size_t buffer_size)
 {
     if (buffer == nullptr || buffer_size == 0)
@@ -2105,53 +2398,102 @@ void format_settings_page_summary(SettingsPage page, char *buffer, size_t buffer
             input_channel_label(gConfig.input_channel_mode),
             sampling_rate_label(gConfig.sampling_rate_mode, configured_sample_rate()));
         break;
-    case SettingsPage::Analysis:
-        snprintf(
-            buffer,
-            buffer_size,
-            use_chinese_ui() ? "FFT %d / 抽取 %d / 平滑 %.2f" : "FFT %d / Decimation %d / Smoothing %.2f",
-            gConfig.fft_size,
-            gConfig.decimations,
-            gConfig.exponential_smoothing_factor);
-        break;
-    case SettingsPage::SpectrumWaterfall:
+    case SettingsPage::FFTAnalysis:
+    {
+        char avg_str[32];
+        if (gConfig.average_frames <= 0)
+            snprintf(avg_str, sizeof(avg_str), "%s", ui_text("off", "关"));
+        else
+            snprintf(avg_str, sizeof(avg_str), use_chinese_ui() ? "%d 帧" : "%d f", gConfig.average_frames);
+
         if (use_chinese_ui())
             snprintf(
                 buffer,
                 buffer_size,
-                "%s / %s / 峰值保持 %s",
-                frequency_axis_label(gConfig.frequency_axis_scale),
-                display_visibility_summary_label(),
-                enabled_state_label(gConfig.max_hold_trace_enabled));
+                "FFT %d / 抽取 %d / 平滑 %.2f / 平均 %s",
+                gConfig.fft_size,
+                gConfig.decimations,
+                gConfig.exponential_smoothing_factor,
+                avg_str);
         else
             snprintf(
                 buffer,
                 buffer_size,
-                "%s / %s / Peak hold %s",
-                frequency_axis_label(gConfig.frequency_axis_scale),
-                display_visibility_summary_label(),
-                enabled_state_label(gConfig.max_hold_trace_enabled));
+                "FFT %d / Dec %d / Smooth %.2f / Avg %s",
+                gConfig.fft_size,
+                gConfig.decimations,
+                gConfig.exponential_smoothing_factor,
+                avg_str);
         break;
-    case SettingsPage::System:
+    }
+    case SettingsPage::Spectrum:
         if (use_chinese_ui())
             snprintf(
                 buffer,
                 buffer_size,
-                "语言 %s / 后台采集 %s / 保持亮屏 %s",
+                "%s / 峰值保持 %s / %d 个标记",
+                frequency_axis_label(gConfig.frequency_axis_scale),
+                enabled_state_label(gConfig.max_hold_trace_enabled),
+                gConfig.peak_marker_count);
+        else
+            snprintf(
+                buffer,
+                buffer_size,
+                "%s / Peak %s / %d markers",
+                frequency_axis_label(gConfig.frequency_axis_scale),
+                enabled_state_label(gConfig.max_hold_trace_enabled),
+                gConfig.peak_marker_count);
+        break;
+    case SettingsPage::Waterfall:
+    {
+        const char *cmap = gConfig.color_map == 0 ? ui_text("Magma", "岩浆") : (gConfig.color_map == 1 ? ui_text("Hot/Cold", "热冷") : ui_text("Gray", "灰度"));
+        if (use_chinese_ui())
+            snprintf(
+                buffer,
+                buffer_size,
+                "%s / 高度 %s / 配色 %s",
+                gConfig.show_waterfall ? "显示" : "隐藏",
+                waterfall_size_label(gConfig.waterfall_size_mode),
+                cmap);
+        else
+            snprintf(
+                buffer,
+                buffer_size,
+                "%s / Height %s / %s",
+                gConfig.show_waterfall ? "Shown" : "Hidden",
+                waterfall_size_label(gConfig.waterfall_size_mode),
+                cmap);
+        break;
+    }
+    case SettingsPage::ToolsAlarms:
+        if (use_chinese_ui())
+            snprintf(
+                buffer,
+                buffer_size,
+                "报警 %s / 导出分析图表",
+                enabled_state_label(gConfig.alarm_enabled));
+        else
+            snprintf(
+                buffer,
+                buffer_size,
+                "Alarm %s / Export Analysis",
+                enabled_state_label(gConfig.alarm_enabled));
+        break;
+    case SettingsPage::SystemAbout:
+        if (use_chinese_ui())
+            snprintf(
+                buffer,
+                buffer_size,
+                "语言 %s / 保持亮屏 %s / 关于信息",
                 ui_language_label(gConfig.ui_language),
-                enabled_state_label(gConfig.background_capture_enabled),
                 enabled_state_label(gConfig.stay_awake));
         else
             snprintf(
                 buffer,
                 buffer_size,
-                "Language %s / Background capture %s / Keep screen on %s",
+                "Lang %s / Awake %s / About",
                 ui_language_label(gConfig.ui_language),
-                enabled_state_label(gConfig.background_capture_enabled),
                 enabled_state_label(gConfig.stay_awake));
-        break;
-    case SettingsPage::About:
-        snprintf(buffer, buffer_size, "%s", ui_text("Repository links, provenance, and open-source notices", "仓库链接、来源说明与开源信息"));
         break;
     case SettingsPage::Home:
     case SettingsPage::None:
@@ -2400,7 +2742,7 @@ void render_audio_input_settings()
             "高采样率取决于设备和驱动支持，不支持时可能无法启动该档位。"));
 }
 
-void render_analysis_settings()
+void render_fft_analysis_settings()
 {
     render_setting_label(ui_text("FFT size", "FFT 大小"));
     set_full_width_item();
@@ -2418,6 +2760,9 @@ void render_analysis_settings()
             if (ImGui::Selectable(label, selected))
             {
                 gConfig.fft_size = value;
+                const int max_dec = MaxDecimationsForFftSize(value);
+                if (gConfig.decimations > max_dec)
+                    gConfig.decimations = max_dec;
                 mark_config_dirty();
                 restart_processing_session();
             }
@@ -2431,15 +2776,26 @@ void render_analysis_settings()
     set_full_width_item();
     if (ImGui::BeginCombo("##decimations", decimations_label(gConfig)))
     {
-        for (int value = 0; value <= 5; value++)
+        const int max_dec = MaxDecimationsForFftSize(gConfig.fft_size);
+        for (int value = 0; value <= max_dec; value++)
         {
-            char label[64];
-            const float dc_resolution = (configured_sample_rate() / (float)(1 << value)) / (float)gConfig.fft_size;
-            const float max_freq_khz = (configured_sample_rate() / (float)(1 << value)) * 0.5f / 1000.0f;
-            if (use_chinese_ui())
-                snprintf(label, sizeof(label), "%d（上限 %.1f kHz，%.1f Hz/bin）", value, max_freq_khz, dc_resolution);
+            char label[96];
+            const int factor = 1 << value;
+            const float dc_resolution = (configured_sample_rate() / (float)factor) / (float)gConfig.fft_size;
+            if (value == 0)
+            {
+                if (use_chinese_ui())
+                    snprintf(label, sizeof(label), "0（关闭 · 48k 全频, %.1f Hz/bin）", dc_resolution);
+                else
+                    snprintf(label, sizeof(label), "0 (Off · 48k full, %.1f Hz/bin)", dc_resolution);
+            }
             else
-                snprintf(label, sizeof(label), "%d (limit %.1f kHz, %.1f Hz/bin)", value, max_freq_khz, dc_resolution);
+            {
+                if (use_chinese_ui())
+                    snprintf(label, sizeof(label), "%d（%d× 低频细化 · 保留全频, %.1f Hz/bin）", value, factor, dc_resolution);
+                else
+                    snprintf(label, sizeof(label), "%d (%dx low-freq · full band kept, %.1f Hz/bin)", value, factor, dc_resolution);
+            }
             const bool selected = gConfig.decimations == value;
             if (ImGui::Selectable(label, selected))
             {
@@ -2487,86 +2843,35 @@ void render_analysis_settings()
         mark_config_dirty();
     }
 
-    char average_label[32];
-    if (gConfig.average_frames == 0)
-        snprintf(average_label, sizeof(average_label), "%s", ui_text("Off", "关闭"));
-    else
-        snprintf(average_label, sizeof(average_label), use_chinese_ui() ? "%d 帧平均" : "%d-frame average", gConfig.average_frames);
+    int average_frames = gConfig.average_frames;
     render_setting_label(ui_text("Time-averaged spectrum", "时间平均频谱"));
     set_full_width_item();
-    if (ImGui::BeginCombo("##average_frames", average_label))
+    const char *avg_format = (average_frames <= 0) ? ui_text("Off", "关闭") : (use_chinese_ui() ? "%d 帧" : "%d frames");
+    if (ImGui::SliderInt("##average_frames", &average_frames, 0, 64, avg_format))
     {
-        const int average_options[] = {0, 16, 32, 64};
-        for (int value : average_options)
+        if (gConfig.average_frames != average_frames)
         {
-            char label[32];
-            if (value == 0)
-                snprintf(label, sizeof(label), "%s", ui_text("Off", "关闭"));
-            else
-                snprintf(label, sizeof(label), use_chinese_ui() ? "%d 帧平均" : "%d-frame average", value);
-            const bool selected = gConfig.average_frames == value;
-            if (ImGui::Selectable(label, selected))
-            {
-                gConfig.average_frames = value;
-                mark_config_dirty();
-            }
-            if (selected)
-                ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-
-    render_section_title(ui_text("Threshold alarm", "阈值报警"));
-    bool alarm_enabled = gConfig.alarm_enabled;
-    if (ImGui::Checkbox(ui_text("Enable alarm", "启用报警"), &alarm_enabled))
-    {
-        gConfig.alarm_enabled = alarm_enabled;
-        mark_config_dirty();
-    }
-
-    if (gConfig.alarm_enabled)
-    {
-        float alarm_threshold = gConfig.alarm_threshold_db;
-        render_setting_label(ui_text("Threshold (dBFS)", "阈值（dBFS）"));
-        set_full_width_item();
-        if (ImGui::SliderFloat("##alarm_threshold", &alarm_threshold, -100.0f, -20.0f, "%.0f dB"))
-        {
-            gConfig.alarm_threshold_db = alarm_threshold;
+            gConfig.average_frames = average_frames;
             mark_config_dirty();
+            std::lock_guard<std::mutex> lock(gStateMutex);
+            gAverageValid[0] = false;
+            gAverageValid[1] = false;
         }
-
-        float alarm_min = gConfig.alarm_freq_min_hz;
-        render_setting_label(ui_text("Frequency range min (Hz)", "频率范围下限（Hz）"));
-        set_full_width_item();
-        if (ImGui::SliderFloat("##alarm_freq_min", &alarm_min, 0.0f, 192000.0f, "%.0f Hz"))
-        {
-            gConfig.alarm_freq_min_hz = alarm_min;
-            mark_config_dirty();
-        }
-
-        float alarm_max = gConfig.alarm_freq_max_hz;
-        render_setting_label(ui_text("Frequency range max (0 = Nyquist)", "频率范围上限（0 = 奈奎斯特）"));
-        set_full_width_item();
-        if (ImGui::SliderFloat("##alarm_freq_max", &alarm_max, 0.0f, 192000.0f, "%.0f Hz"))
-        {
-            gConfig.alarm_freq_max_hz = alarm_max;
-            mark_config_dirty();
-        }
-
-#ifdef ANDROID
-        bool alarm_vibrate = gConfig.alarm_vibrate;
-        if (ImGui::Checkbox(ui_text("Vibrate when triggered", "触发时振动"), &alarm_vibrate))
-        {
-            gConfig.alarm_vibrate = alarm_vibrate;
-            mark_config_dirty();
-        }
-#endif
     }
 }
 
-void render_spectrum_waterfall_settings()
+void render_spectrum_settings()
 {
-    render_section_title(ui_text("Spectrum", "频谱"));
+    bool show_spectrum = gConfig.show_spectrum;
+    if (ImGui::Checkbox(ui_text("Show upper spectrum", "显示上方频谱图"), &show_spectrum))
+    {
+        gConfig.show_spectrum = show_spectrum;
+        if (!gConfig.show_spectrum && !gConfig.show_waterfall)
+            gConfig.show_waterfall = true;
+        mark_config_dirty();
+        apply_display_change(false, false);
+    }
+
     render_setting_label(ui_text("Frequency axis scale", "频率轴刻度"));
     set_full_width_item();
     if (ImGui::BeginCombo("##frequency_axis_scale", frequency_axis_label(gConfig.frequency_axis_scale)))
@@ -2612,7 +2917,7 @@ void render_spectrum_waterfall_settings()
         mark_config_dirty();
     }
 
-    render_section_title(ui_text("Peak Hold", "峰值"));
+    render_section_title(ui_text("Peak Hold & Markers", "峰值与标记"));
     bool max_hold = gConfig.max_hold_trace_enabled;
     if (ImGui::Checkbox(ui_text("Show peak-hold trace", "显示峰值保持曲线"), &max_hold))
     {
@@ -2689,62 +2994,16 @@ void render_spectrum_waterfall_settings()
         }
         ImGui::EndCombo();
     }
+}
 
-    render_section_title(ui_text("Waterfall", "瀑布图"));
-    bool show_spectrum = gConfig.show_spectrum;
-    if (ImGui::Checkbox(ui_text("Show upper spectrum", "显示上方频谱图"), &show_spectrum))
-    {
-        gConfig.show_spectrum = show_spectrum;
-        if (!gConfig.show_spectrum && !gConfig.show_waterfall)
-            gConfig.show_waterfall = true;
-        mark_config_dirty();
-        apply_display_change(false, false);
-    }
-
+void render_waterfall_settings()
+{
     bool show_waterfall = gConfig.show_waterfall;
     if (ImGui::Checkbox(ui_text("Show waterfall", "显示瀑布图"), &show_waterfall))
     {
         gConfig.show_waterfall = show_waterfall;
         if (!gConfig.show_spectrum && !gConfig.show_waterfall)
             gConfig.show_spectrum = true;
-        mark_config_dirty();
-        apply_display_change(false, false);
-    }
-
-    bool waterfall_freeze = gConfig.waterfall_freeze;
-    if (ImGui::Checkbox(ui_text("Freeze waterfall (keep scrolling the spectrum)", "冻结瀑布图（频谱继续更新）"), &waterfall_freeze))
-    {
-        gConfig.waterfall_freeze = waterfall_freeze;
-        mark_config_dirty();
-    }
-
-    render_setting_label(ui_text("Waterfall color map", "瀑布图配色"));
-    set_full_width_item();
-    if (ImGui::BeginCombo("##color_map", gConfig.color_map == 0 ? ui_text("Magma", "岩浆") : (gConfig.color_map == 1 ? ui_text("Hot / cold", "热冷") : ui_text("Grayscale", "灰度"))))
-    {
-        const char *map_names[] = {ui_text("Magma", "岩浆"), ui_text("Hot / cold", "热冷"), ui_text("Grayscale", "灰度")};
-        for (int value = 0; value < 3; value++)
-        {
-            const bool selected = gConfig.color_map == value;
-            if (ImGui::Selectable(map_names[value], selected))
-            {
-                gConfig.color_map = value;
-                {
-                    std::lock_guard<std::mutex> lock(gStateMutex);
-                    SetColorMap(gConfig.color_map);
-                }
-                mark_config_dirty();
-            }
-            if (selected)
-                ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-
-    bool baseline_diff = gConfig.baseline_diff_enabled;
-    if (ImGui::Checkbox(ui_text("Show baseline difference curve", "显示基线差值曲线"), &baseline_diff))
-    {
-        gConfig.baseline_diff_enabled = baseline_diff;
         mark_config_dirty();
         apply_display_change(false, false);
     }
@@ -2776,6 +3035,29 @@ void render_spectrum_waterfall_settings()
         ImGui::EndCombo();
     }
 
+    render_setting_label(ui_text("Waterfall color map", "瀑布图配色"));
+    set_full_width_item();
+    if (ImGui::BeginCombo("##color_map", gConfig.color_map == 0 ? ui_text("Magma", "岩浆") : (gConfig.color_map == 1 ? ui_text("Hot / cold", "热冷") : ui_text("Grayscale", "灰度"))))
+    {
+        const char *map_names[] = {ui_text("Magma", "岩浆"), ui_text("Hot / cold", "热冷"), ui_text("Grayscale", "灰度")};
+        for (int value = 0; value < 3; value++)
+        {
+            const bool selected = gConfig.color_map == value;
+            if (ImGui::Selectable(map_names[value], selected))
+            {
+                gConfig.color_map = value;
+                {
+                    std::lock_guard<std::mutex> lock(gStateMutex);
+                    SetColorMap(gConfig.color_map);
+                }
+                mark_config_dirty();
+            }
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
     float scroll_speed_percent = interval_ms_to_scroll_speed_percent(gConfig.desired_transform_interval_ms);
     render_setting_label(ui_text("Scroll speed (slow to fast)", "滚动速度（慢到快）"));
     set_full_width_item();
@@ -2789,10 +3071,81 @@ void render_spectrum_waterfall_settings()
         ImGui::TextDisabled("当前约 %.0f ms/行", gConfig.desired_transform_interval_ms);
     else
         ImGui::TextDisabled("Current: about %.0f ms/row", gConfig.desired_transform_interval_ms);
+
+    bool waterfall_freeze = gConfig.waterfall_freeze;
+    if (ImGui::Checkbox(ui_text("Freeze waterfall (keep scrolling the spectrum)", "冻结瀑布图（频谱继续更新）"), &waterfall_freeze))
+    {
+        gConfig.waterfall_freeze = waterfall_freeze;
+        mark_config_dirty();
+    }
 }
 
-void render_system_settings()
+void save_analysis_png();
+
+void render_tools_alarms_settings()
 {
+    render_section_title(ui_text("Threshold alarm", "阈值报警"));
+    bool alarm_enabled = gConfig.alarm_enabled;
+    if (ImGui::Checkbox(ui_text("Enable alarm", "启用报警"), &alarm_enabled))
+    {
+        gConfig.alarm_enabled = alarm_enabled;
+        mark_config_dirty();
+    }
+
+    if (gConfig.alarm_enabled)
+    {
+        float alarm_threshold = gConfig.alarm_threshold_db;
+        render_setting_label(ui_text("Threshold (dBFS)", "阈值（dBFS）"));
+        set_full_width_item();
+        if (ImGui::SliderFloat("##alarm_threshold", &alarm_threshold, -100.0f, -20.0f, "%.0f dB"))
+        {
+            gConfig.alarm_threshold_db = alarm_threshold;
+            mark_config_dirty();
+        }
+
+        float alarm_min = gConfig.alarm_freq_min_hz;
+        render_setting_label(ui_text("Frequency range min (Hz)", "频率范围下限（Hz）"));
+        set_full_width_item();
+        if (ImGui::SliderFloat("##alarm_freq_min", &alarm_min, 0.0f, 192000.0f, "%.0f Hz"))
+        {
+            gConfig.alarm_freq_min_hz = alarm_min;
+            mark_config_dirty();
+        }
+
+        float alarm_max = gConfig.alarm_freq_max_hz;
+        render_setting_label(ui_text("Frequency range max (0 = Nyquist)", "频率范围上限（0 = 奈奎斯特）"));
+        set_full_width_item();
+        if (ImGui::SliderFloat("##alarm_freq_max", &alarm_max, 0.0f, 192000.0f, "%.0f Hz"))
+        {
+            gConfig.alarm_freq_max_hz = alarm_max;
+            mark_config_dirty();
+        }
+
+#ifdef ANDROID
+        bool alarm_vibrate = gConfig.alarm_vibrate;
+        if (ImGui::Checkbox(ui_text("Vibrate when triggered", "触发时振动"), &alarm_vibrate))
+        {
+            gConfig.alarm_vibrate = alarm_vibrate;
+            mark_config_dirty();
+        }
+#endif
+    }
+
+    ImGui::Spacing();
+    render_section_title(ui_text("Export", "分析图表导出"));
+    if (touch_button(ui_text("Save Analysis as PNG", "导出当前图表为 PNG"), ImVec2(ImGui::GetContentRegionAvail().x, large_button_height() * 0.88f)))
+        save_analysis_png();
+
+    if (!gExportStatus.empty())
+    {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "%s", gExportStatus.c_str());
+    }
+}
+
+void render_system_about_settings()
+{
+    render_section_title(ui_text("System", "系统偏好"));
     render_setting_label(ui_text("Language", "语言"));
     set_full_width_item();
     if (ImGui::BeginCombo("##ui_language", ui_language_label(gConfig.ui_language)))
@@ -2815,6 +3168,13 @@ void render_system_settings()
         ImGui::EndCombo();
     }
 
+    bool stay_awake = gConfig.stay_awake;
+    if (ImGui::Checkbox(ui_text("Keep screen on", "保持亮屏"), &stay_awake))
+    {
+        gConfig.stay_awake = stay_awake;
+        mark_config_dirty();
+    }
+
     bool background_capture = gConfig.background_capture_enabled;
     if (ImGui::Checkbox(ui_text("Background capture", "后台采集"), &background_capture))
     {
@@ -2822,16 +3182,8 @@ void render_system_settings()
         mark_config_dirty();
     }
 
-    bool stay_awake = gConfig.stay_awake;
-    if (ImGui::Checkbox(ui_text("Keep screen on", "保持亮屏"), &stay_awake))
-    {
-        gConfig.stay_awake = stay_awake;
-        mark_config_dirty();
-    }
-}
-
-void render_about_page()
-{
+    ImGui::Spacing();
+    render_section_title(ui_text("About", "关于"));
     ImGui::TextWrapped(
         "%s",
         ui_text(
@@ -2849,10 +3201,11 @@ void render_settings_home_page()
 {
     const SettingsPage pages[] = {
         SettingsPage::AudioInput,
-        SettingsPage::Analysis,
-        SettingsPage::SpectrumWaterfall,
-        SettingsPage::System,
-        SettingsPage::About,
+        SettingsPage::FFTAnalysis,
+        SettingsPage::Spectrum,
+        SettingsPage::Waterfall,
+        SettingsPage::ToolsAlarms,
+        SettingsPage::SystemAbout,
     };
 
     for (SettingsPage page : pages)
@@ -2865,15 +3218,6 @@ void render_settings_home_page()
             return;
         }
         ImGui::Spacing();
-    }
-
-    char compare_summary[160];
-    snprintf(compare_summary, sizeof(compare_summary), "%s",
-             ui_text("Load a saved trace, diff against current", "加载保存的曲线，与当前对比"));
-    if (render_settings_navigation_card("settings_card_compare", ui_text("Compare", "对比"), compare_summary))
-    {
-        gComparePopupOpen = true;
-        set_settings_page(SettingsPage::None);
     }
 }
 
@@ -2892,17 +3236,20 @@ void render_settings_page()
     case SettingsPage::AudioInput:
         render_audio_input_settings();
         break;
-    case SettingsPage::Analysis:
-        render_analysis_settings();
+    case SettingsPage::FFTAnalysis:
+        render_fft_analysis_settings();
         break;
-    case SettingsPage::SpectrumWaterfall:
-        render_spectrum_waterfall_settings();
+    case SettingsPage::Spectrum:
+        render_spectrum_settings();
         break;
-    case SettingsPage::System:
-        render_system_settings();
+    case SettingsPage::Waterfall:
+        render_waterfall_settings();
         break;
-    case SettingsPage::About:
-        render_about_page();
+    case SettingsPage::ToolsAlarms:
+        render_tools_alarms_settings();
+        break;
+    case SettingsPage::SystemAbout:
+        render_system_about_settings();
         break;
     case SettingsPage::None:
     default:
@@ -2975,48 +3322,66 @@ void draw_file_browser_popup()
             FreeLinkedList(wav_list);
             wav_list = nullptr;
         }
-        const char *suffixes[] = {".wav"};
-        wav_list = GetFilesInFolderEx(gFileWorkingDirectory.c_str(), suffixes, 1);
+        const char *suffixes[] = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"};
+        wav_list = GetFilesInFolderEx(gFileWorkingDirectory.c_str(), suffixes, 7);
         wav_list = SortLinkedList(wav_list);
         wav_list_fresh = true;
         wav_selection[0] = '\0';
-        ImGui::OpenPopup(ui_text("Open audio file", "打开音频文件"));
+        if (wav_list != nullptr && wav_list->pStr != nullptr)
+            snprintf(wav_selection, sizeof(wav_selection), "%s", wav_list->pStr);
+        ImGui::OpenPopup(ui_text("Open audio file###file_browser", "打开音频文件###file_browser"));
     }
 
     if (!ImGui::BeginPopupModal(ui_text("Open audio file###file_browser", "打开音频文件###file_browser"), nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    ImGui::TextUnformatted(ui_text("Select a WAV file (app external files dir):", "选择 WAV 文件（应用外部文件目录）："));
+#ifdef ANDROID
+    if (touch_button(ui_text("[SAF] Browse Phone Audio...", "[系统选择器] 浏览手机音频文件..."), ImVec2(-1.0f, large_button_height() * 0.72f)))
+    {
+        launch_system_file_picker();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted(ui_text("Or select from app directory:", "或从应用目录中选择："));
+#else
+    ImGui::TextUnformatted(ui_text("Select an audio file:", "选择音频文件："));
+#endif
     ImGui::Separator();
 
     bool any = false;
     for (linked_list *node = wav_list; node != nullptr; node = node->pNext)
     {
         any = true;
-        if (ImGui::Selectable(node->pStr, strcmp(node->pStr, wav_selection) == 0))
+        const bool is_selected = (strcmp(node->pStr, wav_selection) == 0);
+        if (ImGui::Selectable(node->pStr, is_selected, ImGuiSelectableFlags_DontClosePopups))
             snprintf(wav_selection, sizeof(wav_selection), "%s", node->pStr);
     }
     if (!any)
-        ImGui::TextDisabled(ui_text("No .wav files found.", "未找到 .wav 文件。"));
+        ImGui::TextDisabled("%s", ui_text("No audio files found (.wav, .mp3, .m4a, .flac, .ogg...).", "未找到音频文件 (.wav, .mp3, .m4a, .flac, .ogg...)。"));
 
     ImGui::Separator();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.0f, 8.0f));
-    if (touch_button(ui_text("Load", "加载"), ImVec2(-1.0f, 0.0f)) && wav_selection[0] != '\0')
+    const float btn_w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    if (touch_button(ui_text("Load", "加载"), ImVec2(btn_w, 0.0f)))
     {
-        char full_path[1200];
-        if (snprintf(full_path, sizeof(full_path), "%s/%s", gFileWorkingDirectory.c_str(), wav_selection) > 0)
+        if (wav_selection[0] != '\0')
         {
-            gFileAudioPath.assign(full_path);
-            gFileSeekFrame = 0;
-            gFileLoadFailed = false;
-            gAnalysisSource = AnalysisSource::File;
-            gDisplayPaused = false;
-            restart_processing_session();
+            char full_path[1200];
+            if (snprintf(full_path, sizeof(full_path), "%s/%s", gFileWorkingDirectory.c_str(), wav_selection) > 0)
+            {
+                gFileAudioPath.assign(full_path);
+                gFileSeekFrame = 0;
+                gFileLoadFailed = false;
+                gFilePlaybackFinished.store(false);
+                gAnalysisSource = AnalysisSource::File;
+                gDisplayPaused = false;
+                restart_processing_session();
+            }
+            ImGui::CloseCurrentPopup();
         }
-        ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (touch_button(ui_text("Cancel", "取消"), ImVec2(-1.0f, 0.0f)))
+    if (touch_button(ui_text("Cancel", "取消"), ImVec2(btn_w, 0.0f)))
         ImGui::CloseCurrentPopup();
     ImGui::PopStyleVar();
 
@@ -3084,18 +3449,11 @@ void draw_toolbar()
     ImGui::SameLine();
     if (gCursorActive)
     {
-        if (touch_button(gCursorPinned ? ui_text("Clear Cursor", "清除游标") : ui_text("Pin", "固定"), ImVec2(button_width, row_height)))
+        if (touch_button(ui_text("Clear Cursor", "清除游标"), ImVec2(button_width, row_height)))
         {
-            if (gCursorPinned)
-            {
-                gCursorPinned = false;
-                gCursorActive = false;
-                gCursorDragging = false;
-            }
-            else
-            {
-                gCursorPinned = true;
-            }
+            gCursorPinned = false;
+            gCursorActive = false;
+            gCursorDragging = false;
         }
     }
     else
@@ -3149,11 +3507,23 @@ void draw_toolbar()
     {
         float left_db = -120.0f;
         float right_db = -120.0f;
+        bool cursor_active = false;
+        float cursor_freq_hz = 0.0f;
+        float cursor_ch0_db = -120.0f;
+        float cursor_ref_ch0_db = -120.0f;
+        bool cursor_ref_valid = false;
+
         {
             std::lock_guard<std::mutex> lock(gStateMutex);
             left_db = gLevelDb[0];
             right_db = gLevelDb[1];
+            cursor_active = gCursorActive;
+            cursor_freq_hz = gCursorFrequencyHz;
+            cursor_ch0_db = gCursorDb[0];
+            cursor_ref_ch0_db = gCursorRefDb[0];
+            cursor_ref_valid = gCursorRefValid[0];
         }
+
         const bool stereo = active_input_channel_count() >= 2 && gDisplayChannelCount >= 2;
         if (use_chinese_ui())
             snprintf(level_text, sizeof(level_text),
@@ -3163,17 +3533,27 @@ void draw_toolbar()
             snprintf(level_text, sizeof(level_text),
                      stereo ? "  ·  L %.1f dB  R %.1f dB" : "  ·  Level %.1f dB",
                      left_db, stereo ? right_db : 0.0f);
-    }
 
-    cursor_text[0] = '\0';
-    if (gCursorActive)
-    {
-        char cursor_freq[32];
-        format_frequency(cursor_freq, sizeof(cursor_freq), gCursorFrequencyHz);
-        if (use_chinese_ui())
-            snprintf(cursor_text, sizeof(cursor_text), "  ·  游标 %s %.1f dB%s", cursor_freq, gCursorDb[0], gCursorPinned ? "（固定）" : "");
-        else
-            snprintf(cursor_text, sizeof(cursor_text), "  ·  Cursor %s %.1f dB%s", cursor_freq, gCursorDb[0], gCursorPinned ? " (pin)" : "");
+        cursor_text[0] = '\0';
+        if (cursor_active)
+        {
+            char cursor_freq[32];
+            format_frequency(cursor_freq, sizeof(cursor_freq), cursor_freq_hz);
+            if (cursor_ref_valid)
+            {
+                const float diff = cursor_ch0_db - cursor_ref_ch0_db;
+                if (use_chinese_ui())
+                    snprintf(cursor_text, sizeof(cursor_text), "  ·  游标 %s %.1f dB (基线 %.1f dB, 差值 %+.1f dB)",
+                             cursor_freq, cursor_ch0_db, cursor_ref_ch0_db, diff);
+                else
+                    snprintf(cursor_text, sizeof(cursor_text), "  ·  Cursor %s %.1f dB (Ref %.1f dB, diff %+.1f dB)",
+                             cursor_freq, cursor_ch0_db, cursor_ref_ch0_db, diff);
+            }
+            else if (use_chinese_ui())
+                snprintf(cursor_text, sizeof(cursor_text), "  ·  游标 %s %.1f dB", cursor_freq, cursor_ch0_db);
+            else
+                snprintf(cursor_text, sizeof(cursor_text), "  ·  Cursor %s %.1f dB", cursor_freq, cursor_ch0_db);
+        }
     }
 
     const char *source_label = file_mode ? ui_text("File", "文件") : ui_text("Input", "输入");
@@ -3216,8 +3596,6 @@ void draw_toolbar()
     ImGui::Dummy(ImVec2(0.0f, 0.0f));
 }
 
-namespace
-{
 void draw_polyline_rgba(uint8_t *rgba, int width, int height, const float *points, int point_count, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
 {
     if (point_count < 2)
@@ -3251,7 +3629,9 @@ bool render_spectrum_to_rgba(uint8_t *rgba, int width, int height)
 {
     BufferIODouble liveLines[kMaxInputChannels];
     BufferIODouble peakLines[kMaxInputChannels];
-    BufferIODouble referenceLine;
+    BufferIODouble referenceLines[kMaxInputChannels];
+    BufferIODouble diffLines[kMaxInputChannels];
+    bool diff_enabled = false;
     int channel_count = 0;
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
@@ -3260,21 +3640,51 @@ bool render_spectrum_to_rgba(uint8_t *rgba, int width, int height)
         {
             liveLines[channel].copy(&display_channel_state(channel).live_line);
             peakLines[channel].copy(&display_channel_state(channel).peak_hold_line);
+            referenceLines[channel].copy(&gSharedState.reference_hold_line[channel]);
+            diffLines[channel].copy(&gDiffLine[channel]);
         }
-        referenceLine.copy(&gSharedState.reference_hold_line);
+        diff_enabled = gConfig.baseline_diff_enabled;
     }
 
-    for (int channel = 0; channel < channel_count; channel++)
+    if (diff_enabled && diffLines[0].GetSize() > 1)
     {
-        if (liveLines[channel].GetSize() > 1)
-            draw_polyline_rgba(rgba, width, height, liveLines[channel].GetData(), liveLines[channel].GetSize() / 2,
-                               90 + channel * 60, 220 - channel * 40, 120, 255);
-        if (gConfig.max_hold_trace_enabled && peakLines[channel].GetSize() > 1)
-            draw_polyline_rgba(rgba, width, height, peakLines[channel].GetData(), peakLines[channel].GetSize() / 2,
-                               255, 120, 60, 255);
+        const int mid_y = height / 2;
+        if (mid_y >= 0 && mid_y < height)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                uint8_t *px = rgba + ((size_t)mid_y * (size_t)width + (size_t)x) * 4;
+                px[0] = (uint8_t)(220 * 0.4f + px[0] * 0.6f);
+                px[1] = (uint8_t)(225 * 0.4f + px[1] * 0.6f);
+                px[2] = (uint8_t)(235 * 0.4f + px[2] * 0.6f);
+                px[3] = 255;
+            }
+        }
+        for (int channel = 0; channel < channel_count; channel++)
+        {
+            if (diffLines[channel].GetSize() > 1)
+            {
+                if (channel == 0)
+                    draw_polyline_rgba(rgba, width, height, diffLines[channel].GetData(), diffLines[channel].GetSize() / 2, 255, 212, 0, 255);
+                else
+                    draw_polyline_rgba(rgba, width, height, diffLines[channel].GetData(), diffLines[channel].GetSize() / 2, 72, 192, 255, 255);
+            }
+        }
     }
-    if (referenceLine.GetSize() > 1)
-        draw_polyline_rgba(rgba, width, height, referenceLine.GetData(), referenceLine.GetSize() / 2, 160, 90, 255, 255);
+    else
+    {
+        for (int channel = 0; channel < channel_count; channel++)
+        {
+            if (liveLines[channel].GetSize() > 1)
+                draw_polyline_rgba(rgba, width, height, liveLines[channel].GetData(), liveLines[channel].GetSize() / 2,
+                                   channel == 0 ? 255 : 72, channel == 0 ? 212 : 192, channel == 0 ? 0 : 255, 255);
+            if (gConfig.max_hold_trace_enabled && peakLines[channel].GetSize() > 1)
+                draw_polyline_rgba(rgba, width, height, peakLines[channel].GetData(), peakLines[channel].GetSize() / 2,
+                                   channel == 0 ? 220 : 255, channel == 0 ? 64 : 105, channel == 0 ? 64 : 180, 255);
+            if (referenceLines[channel].GetSize() > 1)
+                draw_polyline_rgba(rgba, width, height, referenceLines[channel].GetData(), referenceLines[channel].GetSize() / 2, 160, 90, 255, 255);
+        }
+    }
     return true;
 }
 
@@ -3325,59 +3735,6 @@ void save_analysis_png()
     else
         gExportStatus = "Exported " + std::to_string(channels_saved + 1) + " PNG(s) to the external files dir";
 }
-} // namespace
-
-void draw_hold_popup()
-{
-    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.92f, -1));
-    if (!ImGui::BeginPopupModal(ui_text("Compare Menu###compare_menu", "对比菜单###compare_menu"), nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        gCloseHoldPopupRequested = false;
-        return;
-    }
-
-    if (gCloseHoldPopupRequested)
-    {
-        gCloseHoldPopupRequested = false;
-        ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-        return;
-    }
-
-    float loaded_sample_rate = gInputSampleRate;
-    uint32_t loaded_fft_size = static_cast<uint32_t>(gConfig.fft_size);
-    if (HoldPicker(gWorkingDirectory.c_str(), gHoldingState == HOLDING_STATE_READY, &gSharedState.reference_hold_raw, &loaded_sample_rate, &loaded_fft_size))
-    {
-        gConfig.sampling_rate_mode = SamplingRateMode::Fixed;
-        gConfig.sample_rate_hz = static_cast<int>(loaded_sample_rate);
-        gConfig.fft_size = static_cast<int>(loaded_fft_size);
-        gHoldingState = HOLDING_STATE_READY;
-        mark_config_dirty();
-        restart_processing_session();
-    }
-
-    if (touch_button(ui_text("Save current trace", "记录当前曲线")))
-        copy_current_to_reference();
-
-    ImGui::SameLine();
-    if (touch_button(ui_text("Clear reference", "清除基线")))
-    {
-        std::lock_guard<std::mutex> lock(gStateMutex);
-        clear_reference_hold_locked();
-        refresh_display_state_locked(false);
-    }
-
-    ImGui::Separator();
-    if (touch_button(ui_text("Save image as PNG", "保存图片为 PNG")))
-        save_analysis_png();
-
-    if (touch_button(ui_text("Close", "关闭")))
-        ImGui::CloseCurrentPopup();
-
-    ImGui::EndPopup();
-}
 
 void update_cursor_state(const ImRect &spectrumFrame, bool spectrumHovered, const ImRect *waterfallFrames, const bool *waterfallHovered, int waterfallCount)
 {
@@ -3399,6 +3756,14 @@ void update_cursor_state(const ImRect &spectrumFrame, bool spectrumHovered, cons
         }
     }
     const bool mouseDown = ImGui::IsMouseDown(0);
+
+    // If clicking on or holding the Learn Baseline pill button in top-right of spectrum, ignore cursor dragging
+    if (gBaselineState == BaselineLearnState::Sampling ||
+        (gBaselinePillTouchRect.GetWidth() > 0.0f && gBaselinePillTouchRect.Contains(ImGui::GetIO().MousePos)))
+    {
+        gCursorDragging = false;
+        return;
+    }
 
     if (hovered && ImGui::IsMouseClicked(0))
         gCursorDragging = true;
@@ -3493,7 +3858,9 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int
         return;
 
     const float anchor_x = lerp(normalized_x, anchorFrame.Min.x, anchorFrame.Max.x);
-    const ImU32 cursorColor = IM_COL32(70, 255, 180, 255);
+    const bool in_diff_mode = (gBaselineState == BaselineLearnState::Active && gConfig.baseline_diff_enabled);
+    const ImU32 cursorColor = in_diff_mode ? IM_COL32(255, 205, 30, 255) : IM_COL32(70, 255, 180, 255);
+    const ImU32 cursorBoxBorder = in_diff_mode ? IM_COL32(255, 205, 30, 180) : IM_COL32(70, 255, 180, 110);
     const float font_size = overlay_text_font_size();
     const ImVec2 freqSize = calc_overlay_text_size(freqLabel);
     float boxWidth = freqSize.x + 16.0f;
@@ -3504,6 +3871,27 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int
         dbSizes[channel] = calc_overlay_text_size(dbLabels[channel]);
         boxWidth = std::max(boxWidth, dbSizes[channel].x + 16.0f);
         boxHeight += dbSizes[channel].y + 4.0f;
+    }
+    char refLabels[kMaxInputChannels][64];
+    ImVec2 refSizes[kMaxInputChannels];
+    for (int channel = 0; channel < display_channel_count(); channel++)
+    {
+        refLabels[channel][0] = '\0';
+        refSizes[channel] = ImVec2(0.0f, 0.0f);
+        if (gCursorRefValid[channel])
+        {
+            const float diff = gCursorDb[channel] - gCursorRefDb[channel];
+            const char *channel_label = display_channel_title(channel);
+            if (channel_label != nullptr && channel_label[0] != '\0')
+                snprintf(refLabels[channel], sizeof(refLabels[channel]), "%s %s %.1f dB (%s%+.1f dB)",
+                         channel_label, ui_text("Ref:", "基线:"), gCursorRefDb[channel], ui_text("diff ", "差值 "), diff);
+            else
+                snprintf(refLabels[channel], sizeof(refLabels[channel]), "%s %.1f dB (%s%+.1f dB)",
+                         ui_text("Ref:", "基线:"), gCursorRefDb[channel], ui_text("diff ", "差值 "), diff);
+            refSizes[channel] = calc_overlay_text_size(refLabels[channel]);
+            boxWidth = std::max(boxWidth, refSizes[channel].x + 16.0f);
+            boxHeight += refSizes[channel].y + 4.0f;
+        }
     }
     boxHeight += 6.0f;
     float boxX = anchor_x + 10.0f;
@@ -3532,7 +3920,7 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int
     ImGui::GetWindowDrawList()->AddRect(
         ImVec2(boxX, boxY),
         ImVec2(boxX + boxWidth, boxY + boxHeight),
-        IM_COL32(70, 255, 180, 110),
+        cursorBoxBorder,
         6.0f);
     ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), font_size, ImVec2(boxX + 8.0f, boxY + 5.0f), apply_overlay_text_alpha(cursorColor), freqLabel);
     float textY = boxY + 9.0f + freqSize.y;
@@ -3546,14 +3934,28 @@ void draw_cursor(const ImRect &spectrumFrame, const ImRect *waterfallFrames, int
             dbLabels[channel]);
         textY += dbSizes[channel].y + 4.0f;
     }
+    for (int channel = 0; channel < display_channel_count(); channel++)
+    {
+        if (refLabels[channel][0] != '\0')
+        {
+            ImGui::GetWindowDrawList()->AddText(
+                ImGui::GetFont(),
+                font_size,
+                ImVec2(boxX + 8.0f, textY),
+                apply_overlay_text_alpha(IM_COL32(190, 140, 255, 240)),
+                refLabels[channel]);
+            textY += refSizes[channel].y + 4.0f;
+        }
+    }
 }
 
 void draw_spectrum(const ImRect &frame_bb)
 {
     BufferIODouble liveLines[kMaxInputChannels];
     BufferIODouble peakLines[kMaxInputChannels];
-    BufferIODouble referenceLine;
-    BufferIODouble diffLine;
+    BufferIODouble referenceLines[kMaxInputChannels];
+    BufferIODouble diffLines[kMaxInputChannels];
+    bool baseline_ready = false;
     bool diff_enabled = false;
     {
         std::lock_guard<std::mutex> lock(gStateMutex);
@@ -3561,35 +3963,81 @@ void draw_spectrum(const ImRect &frame_bb)
         {
             liveLines[channel].copy(&display_channel_state(channel).live_line);
             peakLines[channel].copy(&display_channel_state(channel).peak_hold_line);
+            referenceLines[channel].copy(&gSharedState.reference_hold_line[channel]);
+            diffLines[channel].copy(&gDiffLine[channel]);
+            if (gHoldingState == HOLDING_STATE_READY && gSharedState.reference_hold_raw[channel].GetSize() > 0)
+                baseline_ready = true;
         }
-        referenceLine.copy(&gSharedState.reference_hold_line);
         diff_enabled = gConfig.baseline_diff_enabled;
-        diffLine.copy(&gDiffLine);
     }
 
-    for (int channel = 0; channel < display_channel_count(); channel++)
-    {
-        if (liveLines[channel].GetSize() > 0)
-            draw_lines(frame_bb, liveLines[channel].GetData(), liveLines[channel].GetSize() / 2, display_channel_live_color(channel), 0, 1);
-        if (gConfig.max_hold_trace_enabled && peakLines[channel].GetSize() > 0)
-            draw_lines(frame_bb, peakLines[channel].GetData(), peakLines[channel].GetSize() / 2, display_channel_peak_color(channel), 0, 1);
-    }
-    if (referenceLine.GetSize() > 0)
-        draw_lines(frame_bb, referenceLine.GetData(), referenceLine.GetSize() / 2, IM_COL32(128, 64, 220, 220), 0, 1);
+    const bool is_diff_mode = (gBaselineState == BaselineLearnState::Active && diff_enabled && baseline_ready && diffLines[0].GetSize() > 0);
 
-    if (diff_enabled && diffLine.GetSize() > 0)
+    if (!is_diff_mode)
     {
-        // 0 dB center line + the difference curve.
-        const ImVec2 zero_a = ImVec2(frame_bb.Min.x, frame_bb.Min.y + frame_bb.GetHeight() * 0.5f);
-        const ImVec2 zero_b = ImVec2(frame_bb.Max.x, zero_a.y);
-        ImGui::GetWindowDrawList()->AddLine(zero_a, zero_b, IM_COL32(0, 200, 255, 90));
-        draw_lines(frame_bb, diffLine.GetData(), diffLine.GetSize() / 2, IM_COL32(0, 200, 255, 230), 0, 1);
+        for (int channel = 0; channel < display_channel_count(); channel++)
+        {
+            if (liveLines[channel].GetSize() > 0)
+                draw_lines(frame_bb, liveLines[channel].GetData(), liveLines[channel].GetSize() / 2, display_channel_live_color(channel), 0, 1);
+            if (gConfig.max_hold_trace_enabled && peakLines[channel].GetSize() > 0)
+                draw_lines(frame_bb, peakLines[channel].GetData(), peakLines[channel].GetSize() / 2, display_channel_peak_color(channel), 0, 1);
+            if (referenceLines[channel].GetSize() > 0)
+                draw_lines(frame_bb, referenceLines[channel].GetData(), referenceLines[channel].GetSize() / 2, IM_COL32(128, 64, 220, 220), 0, 1);
+        }
+    }
+    else
+    {
+        const float font_size = overlay_text_font_size();
+
+        // Horizontal grid reference lines for +/-30 dB with 0 dB center
+        const float db_steps[] = {30.0f, 20.0f, 10.0f, 0.0f, -10.0f, -20.0f, -30.0f};
+        for (float db : db_steps)
+        {
+            const float norm_y = 0.5f - 0.5f * (db / 30.0f);
+            const float y = frame_bb.Min.y + frame_bb.GetHeight() * norm_y;
+            const bool is_zero = (std::abs(db) < 0.1f);
+            const ImU32 line_col = is_zero ? IM_COL32(220, 225, 235, 150) : IM_COL32(140, 150, 165, 45);
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(frame_bb.Min.x, y), ImVec2(frame_bb.Max.x, y), line_col, is_zero ? 1.5f : 1.0f);
+
+            char db_str[16];
+            if (is_zero)
+                snprintf(db_str, sizeof(db_str), "0 dB");
+            else
+                snprintf(db_str, sizeof(db_str), "%+.0f dB", db);
+
+            const ImU32 text_col = is_zero ? IM_COL32(220, 225, 235, 200) : IM_COL32(180, 190, 205, 120);
+            const ImVec2 text_sz = ImGui::GetFont()->CalcTextSizeA(font_size * 0.75f, FLT_MAX, 0.0f, db_str);
+            const float text_x = frame_bb.Max.x - text_sz.x - 10.0f;
+            const float text_y = std::max(frame_bb.Min.y + 4.0f, std::min(y - text_sz.y * 0.9f, frame_bb.Max.y - text_sz.y - 4.0f));
+            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), font_size * 0.75f,
+                                                ImVec2(text_x, text_y),
+                                                text_col, db_str);
+        }
+
+        // Draw each channel's difference curve in its own native identity color
+        for (int channel = 0; channel < display_channel_count(); channel++)
+        {
+            if (diffLines[channel].GetSize() > 0)
+            {
+                const ImU32 trace_color = display_channel_live_color(channel);
+                draw_lines(frame_bb, diffLines[channel].GetData(), diffLines[channel].GetSize() / 2, trace_color, 0, 1);
+            }
+        }
+
+        // Difference title
+        const char *diff_title = ui_text("Difference Mode (+/-30 dB vs Baseline)", "基线差值模式 (±30 dB)");
+        ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), font_size * 0.85f,
+                                            ImVec2(frame_bb.Min.x + 10.0f, frame_bb.Min.y + 8.0f),
+                                            IM_COL32(0, 220, 255, 200), diff_title);
     }
 
     if (gScaleBufferX != nullptr)
         draw_frequency_scale(frame_bb, gScaleBufferX, gConfig.frequency_axis_scale);
-    draw_scale_y(frame_bb, gAxisYMin, gAxisYMax);
-    draw_peak_markers(frame_bb);
+    if (!is_diff_mode)
+    {
+        draw_scale_y(frame_bb, gAxisYMin, gAxisYMax);
+        draw_peak_markers(frame_bb);
+    }
 
     if (display_mode_is_split())
     {
@@ -3603,25 +4051,157 @@ void draw_spectrum(const ImRect &frame_bb)
             ImGui::GetWindowDrawList()->AddText(
                 ImGui::GetFont(),
                 font_size,
-                ImVec2(legend_x, frame_bb.Min.y + 8.0f),
+                ImVec2(legend_x, frame_bb.Min.y + (is_diff_mode ? 28.0f : 8.0f)),
                 apply_overlay_text_alpha(display_channel_live_color(channel)),
                 label);
             legend_x += calc_overlay_text_size(label).x + 20.0f;
+        }
+    }
+
+    // Floating multi-state Learn Baseline pill button in top-right of spectrum
+    const auto now = std::chrono::steady_clock::now();
+    const float font_size = overlay_text_font_size();
+
+    const char *pill_text = "";
+    ImU32 bg_col = IM_COL32(28, 40, 55, 190);
+    ImU32 border_col = IM_COL32(90, 120, 150, 190);
+
+    char sampling_buf[64];
+    if (gBaselineState == BaselineLearnState::Sampling)
+    {
+        const float elapsed = std::chrono::duration<float>(now - gSamplingStartTime).count();
+        snprintf(sampling_buf, sizeof(sampling_buf), "%s %.1fs...", ui_text("Sampling", "采样中"), elapsed);
+        pill_text = sampling_buf;
+        bg_col = IM_COL32(190, 95, 15, 230);
+        border_col = IM_COL32(255, 190, 50, 255);
+    }
+    else if (gBaselineState == BaselineLearnState::Active)
+    {
+        pill_text = ui_text("Clear Baseline (Diff)", "清除基线 (差值中)");
+        bg_col = IM_COL32(0, 140, 200, 210);
+        border_col = IM_COL32(0, 230, 255, 255);
+    }
+    else
+    {
+        pill_text = ui_text("Hold to Learn Baseline", "按住学习基线");
+        bg_col = IM_COL32(28, 40, 55, 190);
+        border_col = IM_COL32(90, 120, 150, 190);
+    }
+
+    const ImVec2 text_size = calc_overlay_text_size(pill_text);
+    const float pill_h = std::max(32.0f, font_size + 14.0f);
+    const float pill_w = std::max(160.0f, text_size.x + 28.0f);
+    const ImVec2 pill_min(frame_bb.Max.x - pill_w - 10.0f, frame_bb.Min.y + 10.0f);
+    const ImVec2 pill_max(pill_min.x + pill_w, pill_min.y + pill_h);
+
+    ImGui::GetWindowDrawList()->AddRectFilled(pill_min, pill_max, bg_col, pill_h * 0.5f);
+    ImGui::GetWindowDrawList()->AddRect(pill_min, pill_max, border_col, pill_h * 0.5f, 0, 1.5f);
+    const ImVec2 text_pos(pill_min.x + (pill_w - text_size.x) * 0.5f, pill_min.y + (pill_h - text_size.y) * 0.5f);
+    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), font_size * 0.95f, text_pos, IM_COL32(255, 255, 255, 255), pill_text);
+
+    // Tip toast display
+    if (now < gBaselineTipExpiry && !gBaselineTip.empty())
+    {
+        const ImVec2 tip_size = calc_overlay_text_size(gBaselineTip.c_str());
+        const float tip_w = tip_size.x + 24.0f;
+        const float tip_h = tip_size.y + 12.0f;
+        const ImVec2 tip_pos(pill_min.x - tip_w - 10.0f, pill_min.y + (pill_h - tip_h) * 0.5f);
+        ImGui::GetWindowDrawList()->AddRectFilled(tip_pos, ImVec2(tip_pos.x + tip_w, tip_pos.y + tip_h), IM_COL32(20, 25, 35, 230), 6.0f);
+        ImGui::GetWindowDrawList()->AddRect(tip_pos, ImVec2(tip_pos.x + tip_w, tip_pos.y + tip_h), IM_COL32(90, 130, 170, 200), 6.0f, 0, 1.0f);
+        ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), font_size * 0.85f, ImVec2(tip_pos.x + 12.0f, tip_pos.y + 6.0f), IM_COL32(255, 255, 255, 240), gBaselineTip.c_str());
+    }
+
+    // Touch interaction
+    const ImRect pill_touch_area(ImVec2(pill_min.x - 10.0f, pill_min.y - 10.0f),
+                                 ImVec2(pill_max.x + 10.0f, pill_max.y + 10.0f));
+    gBaselinePillTouchRect = pill_touch_area;
+    const bool is_hovered = ImGui::IsMouseHoveringRect(pill_touch_area.Min, pill_touch_area.Max);
+    const bool mouse_down = ImGui::IsMouseDown(0);
+    const bool mouse_clicked = ImGui::IsMouseClicked(0);
+
+    if (gBaselineState == BaselineLearnState::Idle)
+    {
+        if (is_hovered && mouse_clicked)
+        {
+            gBaselineState = BaselineLearnState::Sampling;
+            gSamplingStartTime = now;
+            for (int i = 0; i < kMaxInputChannels; i++)
+                gCapturedFrames[i].clear();
+        }
+    }
+    else if (gBaselineState == BaselineLearnState::Sampling)
+    {
+        if (!mouse_down)
+        {
+            // Finger released
+            const float elapsed = std::chrono::duration<float>(now - gSamplingStartTime).count();
+            if (elapsed < 0.3f || gCapturedFrames[0].size() < 5)
+            {
+                gBaselineState = BaselineLearnState::Idle;
+                for (int i = 0; i < kMaxInputChannels; i++)
+                    gCapturedFrames[i].clear();
+                gBaselineTip = ui_text("Hold too short, press and hold to learn", "按住时间过短，请长按采样");
+                gBaselineTipExpiry = now + std::chrono::milliseconds(2000);
+            }
+            else
+            {
+                if (compute_learned_baseline())
+                {
+                    gBaselineState = BaselineLearnState::Active;
+                    gBaselineTip = ui_text("Baseline learned!", "基线学习完成！");
+                    gBaselineTipExpiry = now + std::chrono::milliseconds(1500);
+                }
+                else
+                {
+                    gBaselineState = BaselineLearnState::Idle;
+                    gBaselineTip = ui_text("Failed to learn baseline", "基线学习失败");
+                    gBaselineTipExpiry = now + std::chrono::milliseconds(2000);
+                }
+            }
+        }
+    }
+    else if (gBaselineState == BaselineLearnState::Active)
+    {
+        if (is_hovered && mouse_clicked)
+        {
+            {
+                std::lock_guard<std::mutex> lock(gStateMutex);
+                clear_reference_hold_locked();
+                gConfig.baseline_diff_enabled = false;
+                refresh_display_state_locked(false);
+            }
+            gBaselineState = BaselineLearnState::Idle;
+            for (int i = 0; i < kMaxInputChannels; i++)
+                gCapturedFrames[i].clear();
+            gBaselineTip = ui_text("Baseline cleared", "基线已清除");
+            gBaselineTipExpiry = now + std::chrono::milliseconds(1500);
         }
     }
 }
 
 void render_main_screen()
 {
-    draw_toolbar();
-
-    if (gComparePopupOpen)
+    if (gHasPendingFile.load())
     {
-        gComparePopupOpen = false;
-        set_settings_page(SettingsPage::None);
-        ImGui::OpenPopup(ui_text("Compare Menu###compare_menu", "对比菜单###compare_menu"));
+        std::string path;
+        {
+            std::lock_guard<std::mutex> lock(gPendingFileMutex);
+            path = gPendingFilePath;
+            gHasPendingFile.store(false);
+        }
+        if (!path.empty())
+        {
+            gFileAudioPath = path;
+            gFileSeekFrame = 0;
+            gFileLoadFailed = false;
+            gFilePlaybackFinished.store(false);
+            gAnalysisSource = AnalysisSource::File;
+            gDisplayPaused = false;
+            restart_processing_session();
+        }
     }
-    draw_hold_popup();
+
+    draw_toolbar();
     draw_file_browser_popup();
 
     clear_frequency_gesture_frame();
@@ -3779,6 +4359,21 @@ void Spectrogrammer_Shutdown()
 
 bool Spectrogrammer_MainLoopStep()
 {
+    // Accumulate spectrum frames while user is holding the Learn Baseline button
+    if (gBaselineState == BaselineLearnState::Sampling)
+    {
+        std::lock_guard<std::mutex> lock(gStateMutex);
+        for (int ch = 0; ch < display_channel_count(); ch++)
+        {
+            if (display_channel_state(ch).live_power_raw.GetSize() > 0 && gCapturedFrames[ch].size() < 600)
+            {
+                const int sz = display_channel_state(ch).live_power_raw.GetSize();
+                const float *data = display_channel_state(ch).live_power_raw.GetData();
+                gCapturedFrames[ch].emplace_back(data, data + sz);
+            }
+        }
+    }
+
     // Session lifecycle housekeeping on the UI thread.
     if (gFilePlaybackFinished.exchange(false) && gAnalysisSource == AnalysisSource::File)
     {

@@ -14,4 +14,9 @@ bool Spectrogrammer_UseChineseUi();
 
 #ifdef __cplusplus
 }
+inline const char *ui_text(const char *english, const char *chinese)
+{
+    return Spectrogrammer_UseChineseUi() ? chinese : english;
+}
 #endif
+
