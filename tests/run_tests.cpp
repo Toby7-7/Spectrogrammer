@@ -168,7 +168,8 @@ static void test_colormaps()
     check(GetColorMapCount() == 3, "three color maps available");
 
     SetColorMap(1);
-    check(GetColorMap(0) != 0, "hot/cold map returns data");
+    check(GetColorMap(0) == 0, "hot/cold map starts at black for silence");
+    check(GetColorMap(128) != 0, "hot/cold map returns non-zero data at mid-level");
     SetColorMap(2);
     const uint16_t first = GetColorMap(0);
     bool gray_monotonic = true;
@@ -363,8 +364,10 @@ static void test_fft()
         const float *bins = f.getBufferIO()->GetData();
         int alias_bin = (int)std::round(f.freq2Bin(8000.0f));
         int tone_bin = (int)std::round(f.freq2Bin(1000.0f));
-        check(bins[alias_bin] < 16000.0f * 0.15f, "FIR suppresses the out-of-band (20 kHz) alias image");
+        int high_tone_bin = (int)std::round(f.freq2Bin(20000.0f));
+        check(bins[alias_bin] < 16000.0f * 0.15f, "FIR suppresses the out-of-band (20 kHz) alias image in low-band");
         check(bins[tone_bin] > 32767.0f * 0.4f, "in-band tone survives decimation at expected level");
+        check(bins[high_tone_bin] > 16000.0f * 0.4f, "high-frequency (20 kHz) tone is preserved in stitched full-band spectrum");
     }
 }
 
