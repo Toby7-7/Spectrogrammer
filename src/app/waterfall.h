@@ -12,6 +12,7 @@ void Shutdown_waterfall();
 void Reset_waterfall_storage(int channel = -1);
 // Called by the processing thread; safe against the UI thread.
 void Draw_update(int channel, float *pData, uint32_t size);
+void Draw_update_diff(int channel, float *pData, uint32_t size);
 void Draw_vertical_scale(ImRect frame_bb, float seconds_per_row);
 
 // Export accessors (UI thread): flushes a pending upload, then exposes the
