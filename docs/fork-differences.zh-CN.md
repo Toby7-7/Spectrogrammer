@@ -35,7 +35,7 @@
 - `src/AndroidManifest.xml.template`
   - 增加 `RECORD_AUDIO`、`FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_MICROPHONE`、`WAKE_LOCK` 等权限
   - 注册前台服务
-- `src/java/org/nanoorg/Spectrogrammer/CaptureForegroundService.java`
+- `src/java/org/nanoorg/spectrogrammer/CaptureForegroundService.java`
   - 提供配合后台采集使用的麦克风前台服务
 
 ## 3. 配置持久化与默认值迁移

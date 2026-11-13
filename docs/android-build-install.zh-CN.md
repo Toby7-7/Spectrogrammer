@@ -4,7 +4,7 @@
 
 ## 产物
 - APK 文件：`Spectrogrammer.apk`
-- 包名：`org.nanoorg.Spectrogrammer`
+- 包名：`org.nanoorg.spectrogrammer`
 
 ## 构建前提
 先确认以下条件满足：
@@ -106,23 +106,23 @@ adb -s <设备IP:端口> install -r /home/zhangheng/Spectrogrammer/Spectrogramme
 ### 用 mDNS 服务名启动
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <mDNS服务名> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <mDNS服务名> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 ### 用 IP:端口 启动
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <设备IP:端口> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <设备IP:端口> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 如果要先强制停止再启动：
 
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <设备IP:端口> shell am force-stop org.nanoorg.Spectrogrammer
+adb -s <设备IP:端口> shell am force-stop org.nanoorg.spectrogrammer
 
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <设备IP:端口> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <设备IP:端口> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 ## 查看日志

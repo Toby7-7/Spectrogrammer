@@ -36,7 +36,7 @@ This document summarizes the major differences between this repository and upstr
 - `src/AndroidManifest.xml.template`
   - Adds permissions such as `RECORD_AUDIO`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MICROPHONE`, and `WAKE_LOCK`
   - Registers the foreground service
-- `src/java/org/nanoorg/Spectrogrammer/CaptureForegroundService.java`
+- `src/java/org/nanoorg/spectrogrammer/CaptureForegroundService.java`
   - Provides the microphone foreground service used for background capture
 
 ## 3. Configuration Persistence and Migration

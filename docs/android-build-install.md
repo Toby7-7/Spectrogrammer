@@ -4,7 +4,7 @@ This document describes how to build, install, launch, and inspect the Android A
 
 ## Artifacts
 - APK: `Spectrogrammer.apk`
-- Package name: `org.nanoorg.Spectrogrammer`
+- Package name: `org.nanoorg.spectrogrammer`
 
 ## Prerequisites
 Make sure the following are available:
@@ -106,23 +106,23 @@ Keep `-r` for reinstalling over an existing app.
 ### Launch with an mDNS service name
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <mdns-service-name> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <mdns-service-name> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 ### Launch with an IP:port target
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <device-ip:port> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <device-ip:port> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 To force-stop before relaunching:
 
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <device-ip:port> shell am force-stop org.nanoorg.Spectrogrammer
+adb -s <device-ip:port> shell am force-stop org.nanoorg.spectrogrammer
 
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <device-ip:port> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <device-ip:port> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 ## View Logs
