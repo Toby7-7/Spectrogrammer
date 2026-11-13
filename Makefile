@@ -165,15 +165,16 @@ endif
 LDFLAGS += -lm  
 LDFLAGS += -Wl,--no-undefined
 
-STOREPASS?=password
-DNAME:="CN=example.com, OU=ID, O=Example, L=Doe, S=John, C=GB"
-KEYSTOREFILE:=my-release-key.keystore
-ALIASNAME?=standkey
+STOREPASS?=123456
+KEYPASS?=$(STOREPASS)
+DNAME:="CN=Spectrogrammer, OU=NanoOrg, O=NanoOrg, L=Unknown, ST=Unknown, C=CN"
+KEYSTOREFILE?=my-release-key.keystore
+ALIASNAME?=mykey
 
 keystore : $(KEYSTOREFILE)
 
 $(KEYSTOREFILE) :
-	keytool -genkey -v -keystore $(KEYSTOREFILE) -alias $(ALIASNAME) -keyalg RSA -keysize 2048 -validity 10000 -storepass $(STOREPASS) -keypass $(STOREPASS) -dname $(DNAME)
+	keytool -genkey -v -keystore $(KEYSTOREFILE) -alias $(ALIASNAME) -keyalg RSA -keysize 2048 -validity 10000 -storepass $(STOREPASS) -keypass $(KEYPASS) -dname $(DNAME)
 
 init-submodules:
 	git submodule sync --recursive
@@ -304,10 +305,12 @@ makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so : $(ANDROID_OBJS) libs/$(ARCH)/imgui/l
 endif
 
 ifeq ($(BUILD_ANDROID),y)
-$(ANDROID_DEX_FILE) : $(JAVA_SOURCES) | doctor-android
-	rm -rf $(JAVA_CLASS_DIR) $(ANDROID_DEX_DIR) $(JAVA_JAR_FILE)
-	mkdir -p $(JAVA_CLASS_DIR) $(ANDROID_DEX_DIR)
-	$(JAVAC) -encoding UTF-8 -source 8 -target 8 -classpath $(ANDROID_JAR) -d $(JAVA_CLASS_DIR) $(JAVA_SOURCES)
+ANDROID_GEN_DIR := $(ANDROID_BUILD_DIR)/gen
+$(ANDROID_DEX_FILE) : $(JAVA_SOURCES) $(SRC_DIR)/AndroidManifest.xml | doctor-android
+	rm -rf $(JAVA_CLASS_DIR) $(ANDROID_DEX_DIR) $(ANDROID_GEN_DIR) $(JAVA_JAR_FILE)
+	mkdir -p $(JAVA_CLASS_DIR) $(ANDROID_DEX_DIR) $(ANDROID_GEN_DIR)
+	$(AAPT) package -f -m -J $(ANDROID_GEN_DIR) -I $(ANDROID_JAR) -M $(SRC_DIR)/AndroidManifest.xml -S $(SRC_DIR)/res
+	$(JAVAC) -encoding UTF-8 -source 8 -target 8 -Xlint:all -Xlint:-options -classpath $(ANDROID_JAR) -d $(JAVA_CLASS_DIR) $(JAVA_SOURCES) $$(find $(ANDROID_GEN_DIR) -name '*.java')
 	jar cf $(JAVA_JAR_FILE) -C $(JAVA_CLASS_DIR) .
 	$(D8) --lib $(ANDROID_JAR) --output $(ANDROID_DEX_DIR) $(JAVA_JAR_FILE)
 endif
@@ -339,7 +342,7 @@ makecapk.apk : doctor-android makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so $(SRC_DI
 	rm -rf $(APKFILE)
 	$(ZIPALIGN) -v 4 makecapk.apk $(APKFILE)
 	#Using the apksigner in this way is only required on Android 30+
-	$(APKSIGNER) sign --key-pass pass:$(STOREPASS) --ks-pass pass:$(STOREPASS) --ks $(KEYSTOREFILE) $(APKFILE)
+	$(APKSIGNER) sign --ks $(KEYSTOREFILE) --ks-key-alias $(ALIASNAME) --ks-pass pass:$(STOREPASS) --key-pass pass:$(KEYPASS) $(APKFILE)
 	rm -rf temp.apk
 	rm -rf makecapk.apk
 	@ls -l $(APKFILE)

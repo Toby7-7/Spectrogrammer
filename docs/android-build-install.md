@@ -164,6 +164,17 @@ This removes:
 - Generated Android manifest files
 - Intermediate output such as `build/`, `libs/`, and `makecapk/lib/`
 
+## Release Signing (Windows & Make)
+- By default, local dev builds fall back to `my-release-key.keystore` (`alias=mykey`) so you can keep installing updates over an existing dev build.
+- For consistent multi-machine or release builds, copy `keystore.properties.example` to `keystore.properties` (gitignored) and set `storeFile`, `storePassword`, `keyAlias`, `keyPassword`, then run:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 -Release
+  ```
+- Or pass signing variables explicitly:
+  - Windows (`build_apk.ps1`): `-KeystoreFile ... -KeyAlias ... -KeystorePass ... -KeyPass ...` (or env vars `KEYSTORE_FILE`, `KEY_ALIAS`, `KEYSTORE_PASS`, `KEY_PASS`).
+  - Make: `make BUILD_ANDROID=y KEYSTOREFILE=release.keystore ALIASNAME=spectrogrammer STOREPASS=... KEYPASS=...`
+- Note: switching from the default dev keystore to a new release keystore changes the APK signing certificate; uninstall the dev build once before installing the release-signed APK.
+
 ## Shortest Common Workflow
 ```bash
 env PATH=/tmp/spectrogrammer-toolchain/jdk-17.0.18+8/bin:/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \

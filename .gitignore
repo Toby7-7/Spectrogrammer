@@ -7,6 +7,8 @@
 AndroidManifest.xml
 *.keystore
 *.jks
+keystore.properties
+keystore.local.properties
 
 # Generated files
 bin/
