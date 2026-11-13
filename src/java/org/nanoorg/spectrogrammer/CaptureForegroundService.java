@@ -9,6 +9,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
 
@@ -27,13 +28,17 @@ public class CaptureForegroundService extends Service {
         useChineseUi = intent != null && intent.getBooleanExtra("use_chinese_ui", false);
         createNotificationChannel();
         Notification notification = buildNotification();
-        startForeground(NOTIFICATION_ID, notification);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        stopForeground(true);
+        stopForeground(STOP_FOREGROUND_REMOVE);
         super.onDestroy();
     }
 
@@ -78,13 +83,11 @@ public class CaptureForegroundService extends Service {
                 launchIntent,
                 pendingIntentFlags);
 
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID);
 
         builder.setContentTitle(useChineseUi ? "频谱仪正在采集" : "Spectrogrammer is capturing")
                 .setContentText(useChineseUi ? "后台频谱分析已启用" : "Background spectrum analysis is enabled")
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setSmallIcon(R.drawable.ic_notification)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true);

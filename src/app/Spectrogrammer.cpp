@@ -450,7 +450,6 @@ constexpr int kPeakMarkerCapacity = 5;
 constexpr float kToolbarTopPadding = 72.0f;
 constexpr float kSpectrumMinimumHeight = 260.0f;
 constexpr float kMinimumTouchButtonHeight = 88.0f;
-constexpr int kProcessingBurstLimit = 32;
 constexpr float kMinimumPinchDistanceNormalized = 0.04f;
 constexpr float kSettingsSideMargin = 28.0f;
 constexpr char kGitHubRepositoryUrl[] = "https://github.com/Toby7-7/Spectrogrammer";
@@ -3311,7 +3310,6 @@ void draw_file_bar()
 void draw_file_browser_popup()
 {
     static linked_list *wav_list = nullptr;
-    static bool wav_list_fresh = false;
     static char wav_selection[512];
 
     if (gFileBrowserOpen)
@@ -3325,7 +3323,6 @@ void draw_file_browser_popup()
         const char *suffixes[] = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"};
         wav_list = GetFilesInFolderEx(gFileWorkingDirectory.c_str(), suffixes, 7);
         wav_list = SortLinkedList(wav_list);
-        wav_list_fresh = true;
         wav_selection[0] = '\0';
         if (wav_list != nullptr && wav_list->pStr != nullptr)
             snprintf(wav_selection, sizeof(wav_selection), "%s", wav_list->pStr);
