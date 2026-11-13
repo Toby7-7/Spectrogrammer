@@ -35,12 +35,14 @@ class myFFT : public Processor
 
     int m_nfft = 0;
     float m_fftScaling = 0.0f;
+    float m_invFftScaling = 0.0f;
     float m_sampleRate = 48000.0f;
     float m_freq_resolution = 0.0f;
     int m_decimationFactor = 1;
     WindowFunctionType m_windowFunction = WindowFunctionType::Hann;
 
-    // Windowed-sinc anti-aliasing low-pass used before decimation (D > 1).
+    // Precomputed analysis window lookup table and anti-aliasing FIR filter.
+    std::vector<float> m_window;
     std::vector<float> m_firCoeffs;
     std::vector<float> m_firWindow;
 
@@ -86,9 +88,15 @@ class myFFT : public Processor
     void initBuffers(int nfft)
     {
         m_nfft = nfft;
+        m_window.resize(nfft);
         m_fftScaling = 0.0f;
         for (int i = 0; i < nfft; i++)
-            m_fftScaling += apply_window(m_windowFunction, i, nfft);
+        {
+            const float w = apply_window(m_windowFunction, i, nfft);
+            m_window[i] = w;
+            m_fftScaling += w;
+        }
+        m_invFftScaling = (m_fftScaling > 0.0f) ? (2.0f / m_fftScaling) : 0.0f;
 
         if (m_decimationFactor <= 1)
         {
@@ -179,12 +187,15 @@ public:
 
     void writeInputSample(float sample, int raw_index)
     {
+        if (raw_index < 0)
+            return;
+
         if (m_decimationFactor <= 1)
         {
             if (raw_index >= m_nfft)
                 return;
             float *m_in_samples = m_pInput_samples.GetData();
-            m_in_samples[raw_index] = sample * apply_window(m_windowFunction, raw_index, m_nfft);
+            m_in_samples[raw_index] = sample * m_window[raw_index];
             return;
         }
 
@@ -193,7 +204,7 @@ public:
         if (raw_index >= full_start && raw_index < full_start + m_nfft)
         {
             const int k = raw_index - full_start;
-            m_pInput_full.GetData()[k] = sample * apply_window(m_windowFunction, k, m_nfft);
+            m_pInput_full.GetData()[k] = sample * m_window[k];
         }
 
         // 2. Decimated path: 31-tap FIR low-pass filter + D downsampling
@@ -222,7 +233,7 @@ public:
             return;
 
         float *m_in_samples = m_pInput_decim.GetData();
-        m_in_samples[ii] = acc * apply_window(m_windowFunction, ii, m_nfft);
+        m_in_samples[ii] = acc * m_window[ii];
     }
 
     void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length, int inputStride)
@@ -245,6 +256,8 @@ public:
 
     void computePower(float decay)
     {
+        const float mix = 1.0f - decay;
+
         if (m_decimationFactor <= 1)
         {
             kiss_fftr(m_cfg, m_pInput_samples.GetData(), m_out_cpx);
@@ -254,9 +267,8 @@ public:
             const int binCount = getBinCount();
             for (int i = 0; i < binCount; i++)
             {
-                float power = sqrtf(m_out_cpx[i].r * m_out_cpx[i].r + m_out_cpx[i].i * m_out_cpx[i].i);
-                power *= (2.0f / m_fftScaling);
-                m_rout[i] = m_rout[i] * decay + power * (1.0f - decay);
+                float power = sqrtf(m_out_cpx[i].r * m_out_cpx[i].r + m_out_cpx[i].i * m_out_cpx[i].i) * m_invFftScaling;
+                m_rout[i] = m_rout[i] * decay + power * mix;
                 totalPower += power;
                 if (power > peakPower)
                     peakPower = power;
@@ -273,9 +285,8 @@ public:
         const int half_n = m_nfft / 2;
         for (int i = 0; i <= half_n; i++)
         {
-            float p = sqrtf(m_out_cpx_decim[i].r * m_out_cpx_decim[i].r + m_out_cpx_decim[i].i * m_out_cpx_decim[i].i);
-            p *= (2.0f / m_fftScaling);
-            p_decim[i] = p_decim[i] * decay + p * (1.0f - decay);
+            float p = sqrtf(m_out_cpx_decim[i].r * m_out_cpx_decim[i].r + m_out_cpx_decim[i].i * m_out_cpx_decim[i].i) * m_invFftScaling;
+            p_decim[i] = p_decim[i] * decay + p * mix;
         }
 
         // B. Full-rate high-rate FFT
@@ -283,9 +294,8 @@ public:
         float *p_full = m_full_power.GetData();
         for (int i = 0; i <= half_n; i++)
         {
-            float p = sqrtf(m_out_cpx_full[i].r * m_out_cpx_full[i].r + m_out_cpx_full[i].i * m_out_cpx_full[i].i);
-            p *= (2.0f / m_fftScaling);
-            p_full[i] = p_full[i] * decay + p * (1.0f - decay);
+            float p = sqrtf(m_out_cpx_full[i].r * m_out_cpx_full[i].r + m_out_cpx_full[i].i * m_out_cpx_full[i].i) * m_invFftScaling;
+            p_full[i] = p_full[i] * decay + p * mix;
         }
 
         // C. Stitch into m_pOutput_bins (size: M = (D * N)/2 + 1)
