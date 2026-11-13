@@ -16,7 +16,7 @@ bool read_exact(FILE *f, void *dst, size_t count)
 
 bool LoadSpectrum(const char *filename, BufferIODouble *pBuffer, float *sample_rate, uint32_t *fft_size)
 {
-    if (pBuffer == nullptr || sample_rate == nullptr || fft_size == nullptr)
+    if (pBuffer == nullptr || sample_rate == nullptr || fft_size == nullptr || filename == nullptr)
         return false;
 
     FILE *f = fopen(filename, "rb");
@@ -39,36 +39,41 @@ bool LoadSpectrum(const char *filename, BufferIODouble *pBuffer, float *sample_r
     }
     if (ok)
     {
-        pBuffer->Resize(size);
-        ok = read_exact(f, pBuffer->GetData(), static_cast<size_t>(size) * sizeof(float));
-    }
-
-    if (!ok)
-    {
-        // Leave the buffer in a known-good (empty) state.
-        pBuffer->Resize(0);
+        BufferIODouble temp;
+        temp.Resize(size);
+        ok = read_exact(f, temp.GetData(), static_cast<size_t>(size) * sizeof(float));
+        if (ok)
+        {
+            pBuffer->copy(&temp);
+            *sample_rate = rate;
+            *fft_size = fft;
+        }
     }
 
     fclose(f);
-    if (!ok)
-        return false;
-
-    *sample_rate = rate;
-    *fft_size = fft;
-    return true;
+    return ok;
 }
 
-bool SaveSpectrum(const char *filename, BufferIODouble *pBuffer, float sample_rate, uint32_t fft_size)
+bool SaveSpectrum(const char *filename, const BufferIODouble *pBuffer, float sample_rate, uint32_t fft_size)
 {
-    if (pBuffer == nullptr)
+    if (pBuffer == nullptr || filename == nullptr)
         return false;
+
+    const uint32_t size = pBuffer->GetSize();
+    if (size == 0)
+        return false;
+
+    // Enforce mathematical consistency: size == fft_size / 2 + 1
+    if (fft_size == 0 || fft_size / 2 + 1 != size)
+    {
+        fft_size = (size > 1) ? (size - 1) * 2 : fft_size;
+    }
 
     FILE *f = fopen(filename, "wb");
     if (f == NULL)
         return false;
 
     const uint32_t version = kSpectrumMagicVersion;
-    const uint32_t size = pBuffer->GetSize();
     bool ok = fwrite(&version, 1, sizeof(uint32_t), f) == sizeof(uint32_t) &&
               fwrite(&sample_rate, 1, sizeof(float), f) == sizeof(float) &&
               fwrite(&fft_size, 1, sizeof(uint32_t), f) == sizeof(uint32_t) &&

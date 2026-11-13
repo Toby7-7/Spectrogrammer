@@ -23,8 +23,8 @@ KISSFFT_PKGCONFIG:=libs/$(ARCH)/kissfft/lib64/pkgconfig/kissfft-float.pc
 
 ifeq ($(BUILD_ANDROID),y)
 LABEL?=频谱仪
-APKFILE?=$(APPNAME).apk
-PACKAGENAME?=org.nanoorg.$(APPNAME)
+APKFILE?=Spectrogrammer.apk
+PACKAGENAME?=org.nanoorg.spectrogrammer
 SRC=$(SRC_DIR)/main_android.cpp $(SRC_DIR)/android_native_app_glue.c
 SRC+=$(SRC_DIR)/audio/audio_main.cpp
 SRC+=$(SRC_DIR)/audio/audio_recorder.cpp
@@ -116,7 +116,7 @@ CFLAGS+= -I$(SRC_DIR) -I$(SRC_DIR)/app -I$(SRC_DIR)/audio
 CFLAGS+= -Isubmodules/kissfft -Isubmodules/imgui
 
 ifeq ($(BUILD_ANDROID),y)
-LDFLAGS += -landroid -lGLESv3 -lEGL  -llog -lOpenSLES -lz
+LDFLAGS += -landroid -lGLESv3 -lEGL  -llog -lOpenSLES -lz -lmediandk
 LDFLAGS += -shared -uANativeActivity_onCreate
 endif
 
@@ -165,15 +165,16 @@ endif
 LDFLAGS += -lm  
 LDFLAGS += -Wl,--no-undefined
 
-STOREPASS?=password
-DNAME:="CN=example.com, OU=ID, O=Example, L=Doe, S=John, C=GB"
-KEYSTOREFILE:=my-release-key.keystore
-ALIASNAME?=standkey
+STOREPASS?=123456
+KEYPASS?=$(STOREPASS)
+DNAME:="CN=Spectrogrammer, OU=NanoOrg, O=NanoOrg, L=Unknown, ST=Unknown, C=CN"
+KEYSTOREFILE?=my-release-key.keystore
+ALIASNAME?=mykey
 
 keystore : $(KEYSTOREFILE)
 
 $(KEYSTOREFILE) :
-	keytool -genkey -v -keystore $(KEYSTOREFILE) -alias $(ALIASNAME) -keyalg RSA -keysize 2048 -validity 10000 -storepass $(STOREPASS) -keypass $(STOREPASS) -dname $(DNAME)
+	keytool -genkey -v -keystore $(KEYSTOREFILE) -alias $(ALIASNAME) -keyalg RSA -keysize 2048 -validity 10000 -storepass $(STOREPASS) -keypass $(KEYPASS) -dname $(DNAME)
 
 init-submodules:
 	git submodule sync --recursive
@@ -304,10 +305,12 @@ makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so : $(ANDROID_OBJS) libs/$(ARCH)/imgui/l
 endif
 
 ifeq ($(BUILD_ANDROID),y)
-$(ANDROID_DEX_FILE) : $(JAVA_SOURCES) | doctor-android
-	rm -rf $(JAVA_CLASS_DIR) $(ANDROID_DEX_DIR) $(JAVA_JAR_FILE)
-	mkdir -p $(JAVA_CLASS_DIR) $(ANDROID_DEX_DIR)
-	$(JAVAC) -encoding UTF-8 -source 8 -target 8 -classpath $(ANDROID_JAR) -d $(JAVA_CLASS_DIR) $(JAVA_SOURCES)
+ANDROID_GEN_DIR := $(ANDROID_BUILD_DIR)/gen
+$(ANDROID_DEX_FILE) : $(JAVA_SOURCES) $(SRC_DIR)/AndroidManifest.xml | doctor-android
+	rm -rf $(JAVA_CLASS_DIR) $(ANDROID_DEX_DIR) $(ANDROID_GEN_DIR) $(JAVA_JAR_FILE)
+	mkdir -p $(JAVA_CLASS_DIR) $(ANDROID_DEX_DIR) $(ANDROID_GEN_DIR)
+	$(AAPT) package -f -m -J $(ANDROID_GEN_DIR) -I $(ANDROID_JAR) -M $(SRC_DIR)/AndroidManifest.xml -S $(SRC_DIR)/res
+	$(JAVAC) -encoding UTF-8 -source 8 -target 8 -Xlint:all -Xlint:-options -classpath $(ANDROID_JAR) -d $(JAVA_CLASS_DIR) $(JAVA_SOURCES) $$(find $(ANDROID_GEN_DIR) -name '*.java')
 	jar cf $(JAVA_JAR_FILE) -C $(JAVA_CLASS_DIR) .
 	$(D8) --lib $(ANDROID_JAR) --output $(ANDROID_DEX_DIR) $(JAVA_JAR_FILE)
 endif
@@ -339,19 +342,24 @@ makecapk.apk : doctor-android makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so $(SRC_DI
 	rm -rf $(APKFILE)
 	$(ZIPALIGN) -v 4 makecapk.apk $(APKFILE)
 	#Using the apksigner in this way is only required on Android 30+
-	$(APKSIGNER) sign --key-pass pass:$(STOREPASS) --ks-pass pass:$(STOREPASS) --ks $(KEYSTOREFILE) $(APKFILE)
+	$(APKSIGNER) sign --ks $(KEYSTOREFILE) --ks-key-alias $(ALIASNAME) --ks-pass pass:$(STOREPASS) --key-pass pass:$(KEYPASS) $(APKFILE)
 	rm -rf temp.apk
 	rm -rf makecapk.apk
 	@ls -l $(APKFILE)
 
+VERSION_CODE?=$(shell git rev-list --count HEAD 2>/dev/null || echo 101)
+VERSION_NAME?=1.1.0
+
 manifest: $(SRC_DIR)/AndroidManifest.xml
 
-$(SRC_DIR)/AndroidManifest.xml : doctor-android
+$(SRC_DIR)/AndroidManifest.xml : $(SRC_DIR)/AndroidManifest.xml.template doctor-android
 	rm -rf $(SRC_DIR)/AndroidManifest.xml
 	PACKAGENAME=$(PACKAGENAME) \
 		ANDROIDVERSION=$(ANDROIDVERSION) \
 		ANDROIDTARGET=$(ANDROIDTARGET) \
-		APPNAME=$(APPNAME) envsubst '$$ANDROIDTARGET $$ANDROIDVERSION $$APPNAME $$PACKAGENAME' \
+		APPNAME=$(APPNAME) \
+		VERSION_CODE=$(VERSION_CODE) \
+		VERSION_NAME=$(VERSION_NAME) envsubst '$$ANDROIDTARGET $$ANDROIDVERSION $$APPNAME $$PACKAGENAME $$VERSION_CODE $$VERSION_NAME' \
 		< $(SRC_DIR)/AndroidManifest.xml.template > $(SRC_DIR)/AndroidManifest.xml
 
 uninstall : check-adb

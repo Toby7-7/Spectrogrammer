@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 namespace
 {
@@ -316,6 +317,9 @@ bool LoadAppConfig(const char *path, AppConfig *config)
         loaded.decimations = 0;
     if (loaded.decimations > 5)
         loaded.decimations = 5;
+    const int max_dec = MaxDecimationsForFftSize(loaded.fft_size);
+    if (loaded.decimations > max_dec)
+        loaded.decimations = max_dec;
     if ((int)loaded.waterfall_size_mode < (int)WaterfallSizeMode::OneThird ||
         (int)loaded.waterfall_size_mode > (int)WaterfallSizeMode::ThreeQuarters)
         loaded.waterfall_size_mode = WaterfallSizeMode::TwoThirds;
@@ -352,8 +356,6 @@ bool LoadAppConfig(const char *path, AppConfig *config)
         loaded.color_map = 0;
     if (loaded.average_frames < 0)
         loaded.average_frames = 0;
-    if (loaded.average_frames > 0 && loaded.average_frames < 16)
-        loaded.average_frames = 16;
     if (loaded.average_frames > 64)
         loaded.average_frames = 64;
     if (loaded.alarm_threshold_db < -100.0f)
@@ -434,9 +436,23 @@ bool SaveAppConfig(const char *path, const AppConfig &config)
     return rename(tmp_path, path) == 0;
 }
 
+int MaxDecimationsForFftSize(int fft_size)
+{
+    if (fft_size <= 0)
+        return 0;
+    int max_stages = 0;
+    while ((fft_size << (max_stages + 1)) <= 32768 && max_stages < 5)
+    {
+        max_stages++;
+    }
+    return max_stages;
+}
+
 int GetDecimationFactor(const AppConfig &config)
 {
-    return 1 << config.decimations;
+    const int max_stages = MaxDecimationsForFftSize(config.fft_size);
+    const int effective = std::max(0, std::min(config.decimations, max_stages));
+    return 1 << effective;
 }
 
 float GetEffectiveSampleRate(const AppConfig &config)

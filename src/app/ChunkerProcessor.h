@@ -3,7 +3,7 @@
 #include <vector>
 
 #include "Processor.h"
-#define LOGW(...)
+#include "android_debug.h"
 #include "buf_manager.h"
 
 #define QUEUE_SIZE 32

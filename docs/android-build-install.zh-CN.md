@@ -4,7 +4,7 @@
 
 ## 产物
 - APK 文件：`Spectrogrammer.apk`
-- 包名：`org.nanoorg.Spectrogrammer`
+- 包名：`org.nanoorg.spectrogrammer`
 
 ## 构建前提
 先确认以下条件满足：
@@ -106,23 +106,23 @@ adb -s <设备IP:端口> install -r /home/zhangheng/Spectrogrammer/Spectrogramme
 ### 用 mDNS 服务名启动
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <mDNS服务名> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <mDNS服务名> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 ### 用 IP:端口 启动
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <设备IP:端口> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <设备IP:端口> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 如果要先强制停止再启动：
 
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <设备IP:端口> shell am force-stop org.nanoorg.Spectrogrammer
+adb -s <设备IP:端口> shell am force-stop org.nanoorg.spectrogrammer
 
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <设备IP:端口> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <设备IP:端口> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 ## 查看日志
@@ -163,6 +163,17 @@ make clean
 - 构建出的 APK
 - AndroidManifest 生成文件
 - `build/`、`libs/`、`makecapk/lib/` 等中间产物
+
+## 固定 Release 签名规范（Windows 与 Make）
+- 默认本地开发构建会继续使用仓库根目录的 `my-release-key.keystore`（`alias=mykey`），以保持与已安装开发版的直接覆盖更新兼容。
+- 若需跨机器或正式发版使用固定签名，可复制 `keystore.properties.example` 为 `keystore.properties`（已被 `.gitignore` 忽略），填入 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`，然后执行：
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 -Release
+  ```
+- 也支持通过命令行或环境变量显式指定：
+  - Windows（`build_apk.ps1`）：`-KeystoreFile ... -KeyAlias ... -KeystorePass ... -KeyPass ...`，或环境变量 `KEYSTORE_FILE`、`KEY_ALIAS`、`KEYSTORE_PASS`、`KEY_PASS`；
+  - Make：`make BUILD_ANDROID=y KEYSTOREFILE=release.keystore ALIASNAME=spectrogrammer STOREPASS=... KEYPASS=...`。
+- 注意：首次从本地开发签名切换到新的正式签名时，因签名证书变化，设备端需先卸载原开发版一次，之后即可长期直接覆盖更新。
 
 ## 最常用的最短流程
 ```bash

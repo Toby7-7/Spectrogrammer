@@ -126,6 +126,7 @@ AppConfig MakeDefaultAppConfig();
 bool LoadAppConfig(const char *path, AppConfig *config);
 bool SaveAppConfig(const char *path, const AppConfig &config);
 
+int MaxDecimationsForFftSize(int fft_size);
 int GetDecimationFactor(const AppConfig &config);
 float GetEffectiveSampleRate(const AppConfig &config);
 float GetWaterfallFraction(const AppConfig &config);

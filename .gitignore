@@ -3,9 +3,12 @@
 *.map
 *.idsig
 *.arsc
+*.dex
 AndroidManifest.xml
 *.keystore
 *.jks
+keystore.properties
+keystore.local.properties
 
 # Generated files
 bin/
@@ -14,7 +17,18 @@ out/
 obj/
 libs/
 build/
+makecapk/classes.dex
+makecapk/resources.arsc
+temp.apk
 **/lib/
 **/arm64-v8a/
 *.a
+*.wav
 
+# IDE & Editor files
+.vscode/
+.idea/
+*.suo
+*.user
+GEMINI.md
+makecapk/res/

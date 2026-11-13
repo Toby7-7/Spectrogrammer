@@ -30,7 +30,7 @@ Fork-added standalone files licensed under Apache License 2.0 by Toby7-7:
 
 - src/app/AppConfig.h
 - src/app/AppConfig.cpp
-- src/java/org/nanoorg/Spectrogrammer/CaptureForegroundService.java
+- src/java/org/nanoorg/spectrogrammer/CaptureForegroundService.java
 
 Historical upstream note:
 

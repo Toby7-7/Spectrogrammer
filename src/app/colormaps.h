@@ -8,5 +8,8 @@
 void SetColorMap(int i);
 int GetColorMapCount();
 uint16_t GetColorMap(int i);
+uint16_t GetWarmColorMap(int i);
+uint16_t GetColdColorMap(int i);
+uint16_t GetDiffColorMap(float diff_db, float max_db = 30.0f);
 
 #endif

@@ -133,7 +133,7 @@ extern "C" void android_main(struct android_app* app)
         struct android_poll_source* out_data;
 
         // Poll all events. If the app is not visible, this loop blocks until a window is ready.
-        while (ALooper_pollAll(g_WindowInitialized ? 0 : -1, nullptr, &out_events, (void**)&out_data) >= 0)
+        while (ALooper_pollOnce(g_WindowInitialized ? 0 : -1, nullptr, &out_events, (void**)&out_data) >= 0)
         {
             // Process one event
             if (out_data != nullptr)
@@ -246,9 +246,10 @@ void Init(struct android_app* app)
 
 void MainLoopStep()
 {
-    ImGuiIO& io = ImGui::GetIO();
-    if (g_EglDisplay == EGL_NO_DISPLAY)
+    if (!g_WindowInitialized || !g_ImGuiInitialized || g_EglDisplay == EGL_NO_DISPLAY)
         return;
+
+    ImGuiIO& io = ImGui::GetIO();
 
     // Open on-screen (soft) input if requested by Dear ImGui
     static bool WantTextInputLast = false;
@@ -548,16 +549,24 @@ static bool TryLoadSystemFont(const char* path, float size_pixels)
     ImGuiIO& io = ImGui::GetIO();
     ImFontConfig font_cfg;
     font_cfg.SizePixels = size_pixels;
-    font_cfg.OversampleH = 2;
-    font_cfg.OversampleV = 2;
-    font_cfg.PixelSnapH = false;
-    if (io.Fonts->AddFontFromFileTTF(path, size_pixels, &font_cfg, BuildUiGlyphRanges()) != nullptr)
+    font_cfg.OversampleH = 1;
+    font_cfg.OversampleV = 1;
+    font_cfg.PixelSnapH = true;
+    if (io.Fonts->AddFontFromFileTTF(path, size_pixels, &font_cfg, BuildUiGlyphRanges()) == nullptr)
     {
-        __android_log_print(ANDROID_LOG_INFO, g_LogTag, "loaded system font: %s", path);
-        return true;
+        io.Fonts->Clear();
+        return false;
     }
 
-    return false;
+    if (!io.Fonts->Build())
+    {
+        __android_log_print(ANDROID_LOG_WARN, g_LogTag, "failed to build font atlas for %s; trying next font", path);
+        io.Fonts->Clear();
+        return false;
+    }
+
+    __android_log_print(ANDROID_LOG_INFO, g_LogTag, "loaded and built system font: %s", path);
+    return true;
 }
 
 static const ImWchar* BuildUiGlyphRanges()
@@ -569,6 +578,17 @@ static const ImWchar* BuildUiGlyphRanges()
     ImFontGlyphRangesBuilder builder;
     builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
     builder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+
+    static const ImWchar punctuation_ranges[] = {
+        0x2000, 0x206F, // General Punctuation
+        0x3000, 0x303F, // CJK Symbols and Punctuation
+        0xFF00, 0xFFEF, // Halfwidth and Fullwidth Forms
+        0,
+    };
+    builder.AddRanges(punctuation_ranges);
+
+    // Common extra characters frequently appearing in Chinese song titles, artist names and filenames
+    builder.AddText("洛天依粤港澳纯白遇梦记初音未来虚拟歌手录音下载音乐歌曲文件");
 
     static const char* kUiTexts[] = {
         "频谱仪",
@@ -690,6 +710,22 @@ static const ImWchar* BuildUiGlyphRanges()
         "采集",
         "暂停",
         "固定",
+        "系统选择器",
+        "浏览手机音频文件",
+        "浏览",
+        "或从应用目录中选择：",
+        "选择音频文件：",
+        "未找到音频文件",
+        "波形",
+        "对比菜单",
+        "基线对比",
+        "按住学习基线",
+        "采样中",
+        "清除基线 (差值中)",
+        "基线差值模式 (±30 dB)",
+        "按住时间过短，请长按采样",
+        "基线学习完成！",
+        "基线已清除",
     };
 
     for (const char* text : kUiTexts)
@@ -707,6 +743,7 @@ static void LoadBestAvailableFont()
     const float ui_scale = CalculateUiScale();
     const float font_size = 20.0f * ui_scale;
     static const char* kFontCandidates[] = {
+        "/system/fonts/SysSans-Hans-Regular.ttf",
         "/system/fonts/NotoSansCJK-Regular.ttc",
         "/system/fonts/NotoSansSC-Regular.otf",
         "/system/fonts/NotoSansCJKsc-Regular.otf",
@@ -732,6 +769,7 @@ static void LoadBestAvailableFont()
     ImFontConfig font_cfg;
     font_cfg.SizePixels = font_size;
     io.Fonts->AddFontDefault(&font_cfg);
+    io.Fonts->Build();
     __android_log_print(ANDROID_LOG_WARN, g_LogTag, "%s", "no system CJK font found; using fallback font");
 }
 
@@ -744,7 +782,7 @@ static jobject BuildForegroundServiceIntent(JNIEnv *env, jobject nativeActivity)
         intentClass, "setClassName",
         "(Landroid/content/Context;Ljava/lang/String;)Landroid/content/Intent;");
     jmethodID putExtraMethod = env->GetMethodID(intentClass, "putExtra", "(Ljava/lang/String;Z)Landroid/content/Intent;");
-    jstring className = env->NewStringUTF("org.nanoorg.Spectrogrammer.CaptureForegroundService");
+    jstring className = env->NewStringUTF("org.nanoorg.spectrogrammer.CaptureForegroundService");
     env->CallObjectMethod(intent, setClassNameMethod, nativeActivity, className);
     jstring languageExtraKey = env->NewStringUTF("use_chinese_ui");
     env->CallObjectMethod(intent, putExtraMethod, languageExtraKey, Spectrogrammer_UseChineseUi() ? JNI_TRUE : JNI_FALSE);

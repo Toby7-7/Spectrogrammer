@@ -17,9 +17,26 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#ifdef ANDROID
+#include <media/NdkMediaExtractor.h>
+#include <media/NdkMediaCodec.h>
+#include <media/NdkMediaFormat.h>
+#endif
+
 namespace
 {
 constexpr uint32_t kFileBufCount = 64;
+
+enum class FileDecoderType
+{
+    None,
+    Wav,
+    MediaCodec
+};
 
 struct WavFormat
 {
@@ -41,8 +58,25 @@ struct FileSourceState
     long long startFrame = 0;
     long long producedFrames = 0;
     std::thread feeder;
+    
+    FileDecoderType decoderType = FileDecoderType::None;
+
+    // WAV direct decoder
     FILE *file = nullptr;
     WavFormat fmt;
+
+#ifdef ANDROID
+    // NDK MediaCodec universal decoder
+    int mediaFd = -1;
+    AMediaExtractor *extractor = nullptr;
+    AMediaCodec *codec = nullptr;
+    bool mediaEof = false;
+    std::vector<int16_t> pcmFifo;
+    int32_t mediaSampleRate = 44100;
+    int32_t mediaChannels = 2;
+    int64_t mediaDurationUs = 0;
+#endif
+
     AudioQueue *freeQueue = nullptr;
     AudioQueue *recQueue = nullptr;
     sample_buf *bufs = nullptr;
@@ -211,47 +245,141 @@ int16_t decodeSample(const uint8_t *p, const WavFormat &fmt)
 // remainder of the buffer. Returns the number of real frames decoded.
 long long decodeIntoBuffer(sample_buf *buf, long long takeFrames)
 {
-    const WavFormat &fmt = gSrc.fmt;
-    const int channels = fmt.channels;
-    const int bytesPerSample = fmt.bitsPerSample / 8;
-    const long long capacityFrames = (long long)(buf->cap_ / (2 * channels));
-    const long long totalBytes = takeFrames * channels * bytesPerSample;
-
-    int16_t *out = (int16_t *)buf->buf_;
-    long long decoded = 0;
-    if (gSrc.file != nullptr && totalBytes > 0)
+    if (gSrc.decoderType == FileDecoderType::Wav)
     {
-        uint8_t *raw = (uint8_t *)std::malloc((size_t)totalBytes);
-        if (raw != nullptr)
+        const WavFormat &fmt = gSrc.fmt;
+        const int channels = fmt.channels;
+        const int bytesPerSample = fmt.bitsPerSample / 8;
+        const long long capacityFrames = (long long)(buf->cap_ / (2 * channels));
+        const long long totalBytes = takeFrames * channels * bytesPerSample;
+
+        int16_t *out = (int16_t *)buf->buf_;
+        long long decoded = 0;
+        if (gSrc.file != nullptr && totalBytes > 0)
         {
-            if (fread(raw, 1, (size_t)totalBytes, gSrc.file) == (size_t)totalBytes)
+            uint8_t *raw = (uint8_t *)std::malloc((size_t)totalBytes);
+            if (raw != nullptr)
             {
-                for (long long i = 0; i < takeFrames; i++)
-                    for (int c = 0; c < channels; c++)
-                        out[(i * channels + c)] = decodeSample(raw + (i * channels + c) * bytesPerSample, fmt);
-                decoded = takeFrames;
+                if (fread(raw, 1, (size_t)totalBytes, gSrc.file) == (size_t)totalBytes)
+                {
+                    for (long long i = 0; i < takeFrames; i++)
+                        for (int c = 0; c < channels; c++)
+                            out[(i * channels + c)] = decodeSample(raw + (i * channels + c) * bytesPerSample, fmt);
+                    decoded = takeFrames;
+                }
+                std::free(raw);
             }
-            std::free(raw);
         }
+        // zero-fill the rest (also used for the final partial buffer)
+        const size_t totalSamples = (size_t)capacityFrames * channels;
+        for (size_t i = (size_t)decoded * channels; i < totalSamples; i++)
+            out[i] = 0;
+        buf->size_ = buf->cap_;
+        return decoded;
     }
-    // zero-fill the rest (also used for the final partial buffer)
-    const size_t totalSamples = (size_t)capacityFrames * channels;
-    for (size_t i = (size_t)decoded * channels; i < totalSamples; i++)
-        out[i] = 0;
+#ifdef ANDROID
+    else if (gSrc.decoderType == FileDecoderType::MediaCodec && gSrc.codec != nullptr && gSrc.extractor != nullptr)
+    {
+        const int channels = gSrc.mediaChannels;
+        const long long capacityFrames = (long long)(buf->cap_ / (2 * channels));
+        int16_t *out = (int16_t *)buf->buf_;
+        long long decoded = 0;
+
+        const size_t wantedSamples = (size_t)(takeFrames * channels);
+        while (gSrc.pcmFifo.size() < wantedSamples && !gSrc.mediaEof && !gSrc.stopFeeder.load())
+        {
+            // 1. Feed input to MediaCodec
+            ssize_t inIdx = AMediaCodec_dequeueInputBuffer(gSrc.codec, 1000);
+            if (inIdx >= 0)
+            {
+                size_t inSize = 0;
+                uint8_t *inBuf = AMediaCodec_getInputBuffer(gSrc.codec, (size_t)inIdx, &inSize);
+                if (inBuf != nullptr)
+                {
+                    ssize_t sampleSize = AMediaExtractor_readSampleData(gSrc.extractor, inBuf, inSize);
+                    if (sampleSize < 0)
+                    {
+                        AMediaCodec_queueInputBuffer(gSrc.codec, (size_t)inIdx, 0, 0, 0, AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+                    }
+                    else
+                    {
+                        int64_t pts = AMediaExtractor_getSampleTime(gSrc.extractor);
+                        AMediaCodec_queueInputBuffer(gSrc.codec, (size_t)inIdx, 0, (size_t)sampleSize, (uint64_t)pts, 0);
+                        AMediaExtractor_advance(gSrc.extractor);
+                    }
+                }
+            }
+
+            // 2. Retrieve decoded output from MediaCodec
+            AMediaCodecBufferInfo info;
+            ssize_t outIdx = AMediaCodec_dequeueOutputBuffer(gSrc.codec, &info, 1000);
+            if (outIdx >= 0)
+            {
+                if (info.size > 0)
+                {
+                    size_t outSize = 0;
+                    uint8_t *outBuf = AMediaCodec_getOutputBuffer(gSrc.codec, (size_t)outIdx, &outSize);
+                    if (outBuf != nullptr)
+                    {
+                        const int16_t *pcm = (const int16_t *)(outBuf + info.offset);
+                        size_t sampleCount = (size_t)info.size / sizeof(int16_t);
+                        gSrc.pcmFifo.insert(gSrc.pcmFifo.end(), pcm, pcm + sampleCount);
+                    }
+                }
+                AMediaCodec_releaseOutputBuffer(gSrc.codec, (size_t)outIdx, false);
+                if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)
+                {
+                    gSrc.mediaEof = true;
+                }
+            }
+            else if (outIdx == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED)
+            {
+                AMediaFormat *newFmt = AMediaCodec_getOutputFormat(gSrc.codec);
+                if (newFmt != nullptr)
+                {
+                    AMediaFormat_getInt32(newFmt, "channel-count", &gSrc.mediaChannels);
+                    AMediaFormat_getInt32(newFmt, "sample-rate", &gSrc.mediaSampleRate);
+                    AMediaFormat_delete(newFmt);
+                }
+            }
+            else if (outIdx == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
+            {
+                std::this_thread::yield();
+            }
+        }
+
+        size_t availableSamples = std::min(gSrc.pcmFifo.size(), wantedSamples);
+        if (availableSamples > 0)
+        {
+            std::memcpy(out, gSrc.pcmFifo.data(), availableSamples * sizeof(int16_t));
+            gSrc.pcmFifo.erase(gSrc.pcmFifo.begin(), gSrc.pcmFifo.begin() + availableSamples);
+            decoded = (long long)(availableSamples / channels);
+        }
+
+        // zero-fill remainder
+        const size_t totalSamples = (size_t)capacityFrames * channels;
+        for (size_t i = (size_t)decoded * channels; i < totalSamples; i++)
+            out[i] = 0;
+        buf->size_ = buf->cap_;
+        return decoded;
+    }
+#endif
+
     buf->size_ = buf->cap_;
-    return decoded;
+    std::memset(buf->buf_, 0, buf->cap_);
+    return 0;
 }
 
 void feederLoop()
 {
     using namespace std::chrono;
-    const WavFormat &fmt = gSrc.fmt;
-    const long long totalFrames = (long long)(fmt.dataBytes / (fmt.channels * (fmt.bitsPerSample / 8)));
+    const uint32_t sampleRate = (uint32_t)FileAudio_getSampleRate();
+    const long long totalFrames = FileAudio_totalFrames();
     const long long remainingAtStart = totalFrames - gSrc.startFrame;
 
     time_point<steady_clock> next = steady_clock::now();
     const auto step = nanoseconds(static_cast<int64_t>(
-        ((unsigned long long)gSrc.framesPerBuf * 1000000000ULL) / (unsigned long long)std::max(1u, fmt.sampleRate)));
+        ((unsigned long long)gSrc.framesPerBuf * 1000000000ULL) / (unsigned long long)std::max(1u, sampleRate)));
 
     gSrc.producedFrames = 0;
     while (!gSrc.stopFeeder.load())
@@ -261,7 +389,7 @@ void feederLoop()
             std::this_thread::sleep_for(milliseconds(5));
             continue;
         }
-        if (gSrc.producedFrames >= remainingAtStart)
+        if (gSrc.producedFrames >= remainingAtStart || gSrc.atEnd)
         {
             gSrc.atEnd = true;
             // keep the thread alive until deinit so the consumer can drain
@@ -278,9 +406,14 @@ void feederLoop()
         gSrc.freeQueue->pop();
 
         const long long take = std::min<long long>(gSrc.framesPerBuf, remainingAtStart - gSrc.producedFrames);
-        decodeIntoBuffer(buf, take);
+        long long decoded = decodeIntoBuffer(buf, take);
         gSrc.recQueue->push(buf);
         gSrc.producedFrames += take;
+
+        if (decoded < take && decoded == 0)
+        {
+            gSrc.atEnd = true;
+        }
 
         next += step;
         std::this_thread::sleep_until(next);
@@ -303,6 +436,26 @@ void cleanupLocked()
         std::fclose(gSrc.file);
         gSrc.file = nullptr;
     }
+#ifdef ANDROID
+    if (gSrc.codec != nullptr)
+    {
+        AMediaCodec_stop(gSrc.codec);
+        AMediaCodec_delete(gSrc.codec);
+        gSrc.codec = nullptr;
+    }
+    if (gSrc.extractor != nullptr)
+    {
+        AMediaExtractor_delete(gSrc.extractor);
+        gSrc.extractor = nullptr;
+    }
+    if (gSrc.mediaFd >= 0)
+    {
+        close(gSrc.mediaFd);
+        gSrc.mediaFd = -1;
+    }
+    gSrc.pcmFifo.clear();
+    gSrc.mediaEof = false;
+#endif
     if (gSrc.recQueue != nullptr)
     {
         delete gSrc.recQueue;
@@ -321,6 +474,7 @@ void cleanupLocked()
     }
     gSrc.active = false;
     gSrc.atEnd = false;
+    gSrc.decoderType = FileDecoderType::None;
     gSrc.fmt = WavFormat();
 }
 } // namespace
@@ -337,57 +491,185 @@ bool FileAudio_init(const char *path, int framesPerBuf, long long startFrame)
         return false;
     }
 
-    FILE *f = std::fopen(path, "rb");
-    if (f == nullptr)
-    {
-        gSrc.error = std::string("cannot open file: ") + path;
-        return false;
-    }
-
-    WavFormat fmt;
-    if (!parseWavHeader(f, &fmt, &gSrc.error))
-    {
-        std::fclose(f);
-        return false;
-    }
-
-    const long long totalFrames = (long long)(fmt.dataBytes / (fmt.channels * (fmt.bitsPerSample / 8)));
-    if (totalFrames < 64)
-    {
-        gSrc.error = "file is too short";
-        std::fclose(f);
-        return false;
-    }
-    if (startFrame < 0)
-        startFrame = 0;
-    if (startFrame > totalFrames)
-        startFrame = totalFrames;
-
-    const uint32_t bufBytes = (uint32_t)framesPerBuf * fmt.channels * 2;
-    gSrc.bufs = allocateSampleBufs(kFileBufCount, bufBytes);
-    if (gSrc.bufs == nullptr)
-    {
-        gSrc.error = "out of memory";
-        std::fclose(f);
-        return false;
-    }
-    gSrc.freeQueue = new AudioQueue(kFileBufCount);
-    gSrc.recQueue = new AudioQueue(kFileBufCount);
-    for (uint32_t i = 0; i < kFileBufCount; i++)
-        gSrc.freeQueue->push(&gSrc.bufs[i]);
-
-    gSrc.file = f;
-    gSrc.fmt = fmt;
-    gSrc.framesPerBuf = (uint32_t)framesPerBuf;
-    gSrc.startFrame = startFrame;
-    gSrc.atEnd = false;
-    gSrc.producedFrames = 0;
-    gSrc.active = true;
-
     std::string name(path);
     const size_t slash = name.find_last_of('/');
     gSrc.fileName = (slash == std::string::npos) ? name : name.substr(slash + 1);
-    return true;
+
+    // 1. Try standard WAV parser first
+    FILE *f = std::fopen(path, "rb");
+    if (f != nullptr)
+    {
+        WavFormat fmt;
+        if (parseWavHeader(f, &fmt, &gSrc.error))
+        {
+            const long long totalFrames = (long long)(fmt.dataBytes / (fmt.channels * (fmt.bitsPerSample / 8)));
+            if (totalFrames >= 64)
+            {
+                if (startFrame < 0)
+                    startFrame = 0;
+                if (startFrame > totalFrames)
+                    startFrame = totalFrames;
+
+                const uint32_t bufBytes = (uint32_t)framesPerBuf * fmt.channels * 2;
+                gSrc.bufs = allocateSampleBufs(kFileBufCount, bufBytes);
+                if (gSrc.bufs == nullptr)
+                {
+                    gSrc.error = "out of memory";
+                    std::fclose(f);
+                    return false;
+                }
+                gSrc.freeQueue = new AudioQueue(kFileBufCount);
+                gSrc.recQueue = new AudioQueue(kFileBufCount);
+                for (uint32_t i = 0; i < kFileBufCount; i++)
+                    gSrc.freeQueue->push(&gSrc.bufs[i]);
+
+                // Seek to start position
+                const long long startByteOffset = fmt.dataOffset + startFrame * fmt.channels * (fmt.bitsPerSample / 8);
+                fseek(f, (long)startByteOffset, SEEK_SET);
+
+                gSrc.file = f;
+                gSrc.fmt = fmt;
+                gSrc.framesPerBuf = (uint32_t)framesPerBuf;
+                gSrc.startFrame = startFrame;
+                gSrc.atEnd = false;
+                gSrc.producedFrames = 0;
+                gSrc.decoderType = FileDecoderType::Wav;
+                gSrc.active = true;
+                return true;
+            }
+        }
+        std::fclose(f);
+        f = nullptr;
+    }
+
+#ifdef ANDROID
+    // 2. Fall back to Android NDK MediaExtractor + MediaCodec (MP3, AAC, FLAC, OGG, M4A, etc.)
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0)
+    {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && st.st_size > 0)
+        {
+            AMediaExtractor *extractor = AMediaExtractor_new();
+            if (extractor != nullptr)
+            {
+                media_status_t err = AMediaExtractor_setDataSourceFd(extractor, fd, 0, st.st_size);
+                if (err == AMEDIA_OK)
+                {
+                    size_t numTracks = AMediaExtractor_getTrackCount(extractor);
+                    int audioTrack = -1;
+                    AMediaFormat *trackFmt = nullptr;
+                    const char *mime = nullptr;
+
+                    for (size_t i = 0; i < numTracks; i++)
+                    {
+                        trackFmt = AMediaExtractor_getTrackFormat(extractor, i);
+                        if (trackFmt != nullptr)
+                        {
+                            if (AMediaFormat_getString(trackFmt, "mime", &mime) && mime != nullptr)
+                            {
+                                if (strncmp(mime, "audio/", 6) == 0)
+                                {
+                                    audioTrack = (int)i;
+                                    break;
+                                }
+                            }
+                            AMediaFormat_delete(trackFmt);
+                            trackFmt = nullptr;
+                        }
+                    }
+
+                    if (audioTrack >= 0 && trackFmt != nullptr)
+                    {
+                        AMediaExtractor_selectTrack(extractor, (size_t)audioTrack);
+
+                        int32_t sampleRate = 44100;
+                        int32_t channels = 2;
+                        int64_t durationUs = 0;
+                        AMediaFormat_getInt32(trackFmt, "sample-rate", &sampleRate);
+                        AMediaFormat_getInt32(trackFmt, "channel-count", &channels);
+                        AMediaFormat_getInt64(trackFmt, "durationUs", &durationUs);
+
+                        if (channels > 2)
+                            channels = 2;
+                        if (sampleRate <= 0)
+                            sampleRate = 44100;
+
+                        AMediaCodec *codec = AMediaCodec_createDecoderByType(mime);
+                        if (codec != nullptr)
+                        {
+                            media_status_t cfgErr = AMediaCodec_configure(codec, trackFmt, nullptr, nullptr, 0);
+                            media_status_t startErr = AMediaCodec_start(codec);
+                            AMediaFormat_delete(trackFmt);
+
+                            if (cfgErr == AMEDIA_OK && startErr == AMEDIA_OK)
+                            {
+                                const long long totalFrames = (long long)((double)durationUs / 1000000.0 * (double)sampleRate);
+                                if (startFrame < 0)
+                                    startFrame = 0;
+                                if (startFrame > totalFrames && totalFrames > 0)
+                                    startFrame = totalFrames;
+
+                                if (startFrame > 0 && sampleRate > 0)
+                                {
+                                    int64_t targetUs = (int64_t)((double)startFrame / (double)sampleRate * 1000000.0);
+                                    AMediaExtractor_seekTo(extractor, targetUs, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
+                                }
+
+                                const uint32_t bufBytes = (uint32_t)framesPerBuf * (uint32_t)channels * 2;
+                                gSrc.bufs = allocateSampleBufs(kFileBufCount, bufBytes);
+                                if (gSrc.bufs == nullptr)
+                                {
+                                    AMediaCodec_stop(codec);
+                                    AMediaCodec_delete(codec);
+                                    AMediaExtractor_delete(extractor);
+                                    close(fd);
+                                    gSrc.error = "out of memory";
+                                    return false;
+                                }
+
+                                gSrc.freeQueue = new AudioQueue(kFileBufCount);
+                                gSrc.recQueue = new AudioQueue(kFileBufCount);
+                                for (uint32_t i = 0; i < kFileBufCount; i++)
+                                    gSrc.freeQueue->push(&gSrc.bufs[i]);
+
+                                gSrc.extractor = extractor;
+                                gSrc.codec = codec;
+                                gSrc.mediaFd = fd;
+                                gSrc.mediaSampleRate = sampleRate;
+                                gSrc.mediaChannels = channels;
+                                gSrc.mediaDurationUs = durationUs;
+                                gSrc.mediaEof = false;
+                                gSrc.pcmFifo.clear();
+
+                                gSrc.framesPerBuf = (uint32_t)framesPerBuf;
+                                gSrc.startFrame = startFrame;
+                                gSrc.atEnd = false;
+                                gSrc.producedFrames = 0;
+                                gSrc.decoderType = FileDecoderType::MediaCodec;
+                                gSrc.active = true;
+                                return true;
+                            }
+                            else
+                            {
+                                AMediaCodec_delete(codec);
+                            }
+                        }
+                        else
+                        {
+                            AMediaFormat_delete(trackFmt);
+                        }
+                    }
+                }
+                AMediaExtractor_delete(extractor);
+            }
+        }
+        close(fd);
+    }
+#endif
+
+    gSrc.error = "unsupported audio format or damaged file";
+    return false;
 }
 
 void FileAudio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ)
@@ -398,19 +680,35 @@ void FileAudio_getBufferQueues(AudioQueue **pFreeQ, AudioQueue **pRecQ)
 
 int FileAudio_getInputChannelCount()
 {
-    return gSrc.active ? (int)gSrc.fmt.channels : 1;
+    if (!gSrc.active)
+        return 1;
+    if (gSrc.decoderType == FileDecoderType::Wav)
+        return (int)gSrc.fmt.channels;
+#ifdef ANDROID
+    if (gSrc.decoderType == FileDecoderType::MediaCodec)
+        return (int)gSrc.mediaChannels;
+#endif
+    return 1;
 }
 
 float FileAudio_getSampleRate()
 {
-    return gSrc.active ? (float)gSrc.fmt.sampleRate : 0.0f;
+    if (!gSrc.active)
+        return 0.0f;
+    if (gSrc.decoderType == FileDecoderType::Wav)
+        return (float)gSrc.fmt.sampleRate;
+#ifdef ANDROID
+    if (gSrc.decoderType == FileDecoderType::MediaCodec)
+        return (float)gSrc.mediaSampleRate;
+#endif
+    return 0.0f;
 }
 
 bool FileAudio_startPlay()
 {
     if (!gSrc.active || gSrc.feederAlive)
         return gSrc.feederAlive;
-    if (gSrc.startFrame >= (long long)(gSrc.fmt.dataBytes / (gSrc.fmt.channels * (gSrc.fmt.bitsPerSample / 8))))
+    if (gSrc.startFrame >= FileAudio_totalFrames() && FileAudio_totalFrames() > 0)
     {
         gSrc.atEnd = true;
         return true;
@@ -440,18 +738,18 @@ bool FileAudio_atEnd()
 
 long long FileAudio_positionFrames()
 {
-    const long long total = (long long)(gSrc.fmt.dataBytes / (gSrc.fmt.channels * (gSrc.fmt.bitsPerSample / 8)));
+    const long long total = FileAudio_totalFrames();
     const long long pos = gSrc.startFrame + gSrc.producedFrames;
     if (pos < 0)
         return 0;
-    if (pos > total)
+    if (pos > total && total > 0)
         return total;
     return pos;
 }
 
 double FileAudio_getProgress()
 {
-    const long long total = (long long)(gSrc.fmt.dataBytes / (gSrc.fmt.channels * (gSrc.fmt.bitsPerSample / 8)));
+    const long long total = FileAudio_totalFrames();
     if (total <= 0)
         return 1.0;
     const double p = (double)FileAudio_positionFrames() / (double)total;
@@ -464,7 +762,20 @@ double FileAudio_getProgress()
 
 long long FileAudio_totalFrames()
 {
-    return (long long)(gSrc.fmt.dataBytes / (gSrc.fmt.channels * (gSrc.fmt.bitsPerSample / 8)));
+    if (gSrc.decoderType == FileDecoderType::Wav)
+    {
+        const int bytesPerSample = gSrc.fmt.bitsPerSample / 8;
+        if (gSrc.fmt.channels > 0 && bytesPerSample > 0)
+            return (long long)(gSrc.fmt.dataBytes / (gSrc.fmt.channels * bytesPerSample));
+        return 0;
+    }
+#ifdef ANDROID
+    if (gSrc.decoderType == FileDecoderType::MediaCodec)
+    {
+        return (long long)((double)gSrc.mediaDurationUs / 1000000.0 * (double)gSrc.mediaSampleRate);
+    }
+#endif
+    return 0;
 }
 
 const char *FileAudio_fileName()

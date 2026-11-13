@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <vector>
+#include <algorithm>
 #include "Processor.h"
 #include "kiss_fftr.h"
 #include "auformat.h"
@@ -15,25 +16,33 @@ float apply_window(WindowFunctionType windowFunction, int i, int window_size);
 
 class myFFT : public Processor
 {
+    // Single-rate FFT structures (m_decimationFactor <= 1)
+    kiss_fftr_cfg m_cfg = nullptr;
     kiss_fft_cpx *m_out_cpx = nullptr;
-
-    kiss_fftr_cfg m_cfg;
-
     BufferIODouble m_pInput_samples;
+
+    // Dual-rate FFT structures (m_decimationFactor > 1)
+    kiss_fftr_cfg m_cfg_decim = nullptr;
+    kiss_fftr_cfg m_cfg_full = nullptr;
+    kiss_fft_cpx *m_out_cpx_decim = nullptr;
+    kiss_fft_cpx *m_out_cpx_full = nullptr;
+    BufferIODouble m_pInput_decim;
+    BufferIODouble m_pInput_full;
+    BufferIODouble m_decim_power;
+    BufferIODouble m_full_power;
+
     BufferIODouble m_pOutput_bins;
 
-    float m_fftScaling;
-    float m_sampleRate;
-    float m_freq_resolution;
+    int m_nfft = 0;
+    float m_fftScaling = 0.0f;
+    float m_sampleRate = 48000.0f;
+    float m_freq_resolution = 0.0f;
     int m_decimationFactor = 1;
     WindowFunctionType m_windowFunction = WindowFunctionType::Hann;
 
     // Windowed-sinc anti-aliasing low-pass used before decimation (D > 1).
-    // Without it, simply dropping samples aliases the band above the
-    // decimated Nyquist frequency into the spectrum.
     std::vector<float> m_firCoeffs;
     std::vector<float> m_firWindow;
-    int m_firRawSeen = 0;
 
     float m_lastPeakPower = 0.0f;
     float m_lastTotalPower = 0.0f;
@@ -42,7 +51,6 @@ class myFFT : public Processor
     {
         m_firCoeffs.clear();
         m_firWindow.clear();
-        m_firRawSeen = 0;
         if (m_decimationFactor <= 1)
             return;
 
@@ -75,29 +83,75 @@ class myFFT : public Processor
         m_firWindow.assign(taps, 0.0f);
     }
 
-    void init(int nfft)
+    void initBuffers(int nfft)
     {
-        m_cfg = kiss_fftr_alloc(nfft, false, 0, 0);
-        m_pInput_samples.Resize(nfft);
-        m_pOutput_bins.Resize(nfft/2+1);
+        m_nfft = nfft;
+        m_fftScaling = 0.0f;
+        for (int i = 0; i < nfft; i++)
+            m_fftScaling += apply_window(m_windowFunction, i, nfft);
 
-        for (int i = 0; i < m_pInput_samples.GetSize(); i++)
-            m_pInput_samples.GetData()[i]=0;
-        for (int i = 0; i < m_pOutput_bins.GetSize(); i++)
-            m_pOutput_bins.GetData()[i]=0;
+        if (m_decimationFactor <= 1)
+        {
+            m_cfg = kiss_fftr_alloc(nfft, false, 0, 0);
+            m_out_cpx = (kiss_fft_cpx *)malloc(sizeof(kiss_fft_cpx) * (nfft / 2 + 1));
+            m_pInput_samples.Resize(nfft);
+            m_pInput_samples.clear();
+            m_pOutput_bins.Resize(nfft / 2 + 1);
+            m_pOutput_bins.clear();
+        }
+        else
+        {
+            m_cfg_decim = kiss_fftr_alloc(nfft, false, 0, 0);
+            m_cfg_full = kiss_fftr_alloc(nfft, false, 0, 0);
+            m_out_cpx_decim = (kiss_fft_cpx *)malloc(sizeof(kiss_fft_cpx) * (nfft / 2 + 1));
+            m_out_cpx_full = (kiss_fft_cpx *)malloc(sizeof(kiss_fft_cpx) * (nfft / 2 + 1));
+            m_pInput_decim.Resize(nfft);
+            m_pInput_decim.clear();
+            m_pInput_full.Resize(nfft);
+            m_pInput_full.clear();
+            m_decim_power.Resize(nfft / 2 + 1);
+            m_decim_power.clear();
+            m_full_power.Resize(nfft / 2 + 1);
+            m_full_power.clear();
 
-        m_out_cpx = (kiss_fft_cpx*) malloc(sizeof(kiss_fft_cpx) * (nfft/2+1));
-
-        m_fftScaling = 0;
-        for(int i=0;i<m_pInput_samples.GetSize();i++)
-            m_fftScaling += apply_window(m_windowFunction, i, m_pInput_samples.GetSize());
+            const int totalBins = (m_decimationFactor * nfft) / 2 + 1;
+            m_pOutput_bins.Resize(totalBins);
+            m_pOutput_bins.clear();
+        }
     }
 
     void deinit()
     {
-        kiss_fftr_free(m_cfg);
-        free(m_out_cpx);
-        m_out_cpx = nullptr;
+        if (m_cfg)
+        {
+            kiss_fftr_free(m_cfg);
+            m_cfg = nullptr;
+        }
+        if (m_cfg_decim)
+        {
+            kiss_fftr_free(m_cfg_decim);
+            m_cfg_decim = nullptr;
+        }
+        if (m_cfg_full)
+        {
+            kiss_fftr_free(m_cfg_full);
+            m_cfg_full = nullptr;
+        }
+        if (m_out_cpx)
+        {
+            free(m_out_cpx);
+            m_out_cpx = nullptr;
+        }
+        if (m_out_cpx_decim)
+        {
+            free(m_out_cpx_decim);
+            m_out_cpx_decim = nullptr;
+        }
+        if (m_out_cpx_full)
+        {
+            free(m_out_cpx_full);
+            m_out_cpx_full = nullptr;
+        }
     }
 
 public:
@@ -106,47 +160,51 @@ public:
         deinit();
     }
 
-    virtual const char *GetName() const {  return "FFT"; };
+    virtual const char *GetName() const { return "DualRateFFT"; }
 
     void init(int nfft, float sampleRate, int decimationFactor, WindowFunctionType windowFunction)
     {
+        deinit();
         m_decimationFactor = decimationFactor < 1 ? 1 : decimationFactor;
         m_windowFunction = windowFunction;
-        init(nfft);
         m_sampleRate = sampleRate;
-        m_freq_resolution = (sampleRate / (float)m_decimationFactor) / nfft;
+        initBuffers(nfft);
+        m_freq_resolution = (sampleRate / (float)m_decimationFactor) / (float)nfft;
         buildFirFilter();
     }
 
     int getBinCount() const { return m_pOutput_bins.GetSize(); }
 
-    int getProcessedLength() const { return m_pInput_samples.GetSize() * m_decimationFactor; }
+    int getProcessedLength() const { return m_nfft * m_decimationFactor; }
 
     void writeInputSample(float sample, int raw_index)
     {
         if (m_decimationFactor <= 1)
         {
-            const int ii = raw_index;
-            if (ii >= m_pInput_samples.GetSize())
+            if (raw_index >= m_nfft)
                 return;
-
             float *m_in_samples = m_pInput_samples.GetData();
-            m_in_samples[ii] = sample * apply_window(m_windowFunction, ii, m_pInput_samples.GetSize());
+            m_in_samples[raw_index] = sample * apply_window(m_windowFunction, raw_index, m_nfft);
             return;
         }
 
+        // 1. Full-rate path: temporally centered in the N*D raw chunk
+        const int full_start = (m_nfft * m_decimationFactor - m_nfft) / 2;
+        if (raw_index >= full_start && raw_index < full_start + m_nfft)
+        {
+            const int k = raw_index - full_start;
+            m_pInput_full.GetData()[k] = sample * apply_window(m_windowFunction, k, m_nfft);
+        }
+
+        // 2. Decimated path: 31-tap FIR low-pass filter + D downsampling
         const int taps = (int)m_firCoeffs.size();
         if (taps == 0)
             return;
 
-        // Sliding window of the most recent `taps` raw samples.
+        if (raw_index == 0)
+            std::fill(m_firWindow.begin(), m_firWindow.end(), 0.0f);
+
         m_firWindow[raw_index % taps] = sample;
-        if (m_firRawSeen < taps)
-        {
-            // Filter still warming up: collect the full window first.
-            m_firRawSeen++;
-            return;
-        }
 
         if ((raw_index % m_decimationFactor) != 0)
             return;
@@ -160,11 +218,11 @@ public:
         }
 
         const int ii = raw_index / m_decimationFactor;
-        if (ii >= m_pInput_samples.GetSize())
+        if (ii >= m_nfft)
             return;
 
-        float *m_in_samples = m_pInput_samples.GetData();
-        m_in_samples[ii] = acc * apply_window(m_windowFunction, ii, m_pInput_samples.GetSize());
+        float *m_in_samples = m_pInput_decim.GetData();
+        m_in_samples[ii] = acc * apply_window(m_windowFunction, ii, m_nfft);
     }
 
     void convertShortToFFT(const AU_FORMAT *input, int offsetDest, int length, int inputStride)
@@ -187,39 +245,111 @@ public:
 
     void computePower(float decay)
     {
-        kiss_fftr( m_cfg , m_pInput_samples.GetData() , m_out_cpx );
+        if (m_decimationFactor <= 1)
+        {
+            kiss_fftr(m_cfg, m_pInput_samples.GetData(), m_out_cpx);
+            float totalPower = 0.0f;
+            float peakPower = 0.0f;
+            float *m_rout = m_pOutput_bins.GetData();
+            const int binCount = getBinCount();
+            for (int i = 0; i < binCount; i++)
+            {
+                float power = sqrtf(m_out_cpx[i].r * m_out_cpx[i].r + m_out_cpx[i].i * m_out_cpx[i].i);
+                power *= (2.0f / m_fftScaling);
+                m_rout[i] = m_rout[i] * decay + power * (1.0f - decay);
+                totalPower += power;
+                if (power > peakPower)
+                    peakPower = power;
+            }
+            m_lastTotalPower = totalPower;
+            m_lastPeakPower = peakPower;
+            return;
+        }
 
-        float totalPower = 0;
-        float peakPower = 0;
+        // Multi-rate dual FFT execution:
+        // A. Decimated low-rate FFT
+        kiss_fftr(m_cfg_decim, m_pInput_decim.GetData(), m_out_cpx_decim);
+        float *p_decim = m_decim_power.GetData();
+        const int half_n = m_nfft / 2;
+        for (int i = 0; i <= half_n; i++)
+        {
+            float p = sqrtf(m_out_cpx_decim[i].r * m_out_cpx_decim[i].r + m_out_cpx_decim[i].i * m_out_cpx_decim[i].i);
+            p *= (2.0f / m_fftScaling);
+            p_decim[i] = p_decim[i] * decay + p * (1.0f - decay);
+        }
+
+        // B. Full-rate high-rate FFT
+        kiss_fftr(m_cfg_full, m_pInput_full.GetData(), m_out_cpx_full);
+        float *p_full = m_full_power.GetData();
+        for (int i = 0; i <= half_n; i++)
+        {
+            float p = sqrtf(m_out_cpx_full[i].r * m_out_cpx_full[i].r + m_out_cpx_full[i].i * m_out_cpx_full[i].i);
+            p *= (2.0f / m_fftScaling);
+            p_full[i] = p_full[i] * decay + p * (1.0f - decay);
+        }
+
+        // C. Stitch into m_pOutput_bins (size: M = (D * N)/2 + 1)
+        const float f_nyq2 = m_sampleRate / (2.0f * (float)m_decimationFactor);
+        const float f_a = 0.70f * f_nyq2;
+        const float f_b = 0.90f * f_nyq2;
+        const float inv_trans = (f_b > f_a) ? (1.0f / (f_b - f_a)) : 0.0f;
+        const float full_df = m_sampleRate / (float)m_nfft;
 
         float *m_rout = m_pOutput_bins.GetData();
-        for (int i = 0; i < getBinCount(); i++)
-        {
-            float power = sqrt(m_out_cpx[i].r * m_out_cpx[i].r + m_out_cpx[i].i * m_out_cpx[i].i);
-            power *= (2 / m_fftScaling);
-            m_rout[i] = m_rout[i] *decay + power*(1.0f-decay);
+        const int totalBins = getBinCount();
+        float totalPower = 0.0f;
+        float peakPower = 0.0f;
 
-            totalPower += power;
-            if (power > peakPower)
-                peakPower = power;
+        for (int i = 0; i < totalBins; i++)
+        {
+            const float freq = static_cast<float>(i) * m_freq_resolution;
+            float val = 0.0f;
+
+            if (freq < f_a)
+            {
+                val = (i <= half_n) ? p_decim[i] : 0.0f;
+            }
+            else
+            {
+                const float k_f = full_df > 0.0f ? (freq / full_df) : 0.0f;
+                const int k0 = std::max(0, std::min(static_cast<int>(floorf(k_f)), half_n));
+                const int k1 = std::min(k0 + 1, half_n);
+                const float frac = std::max(0.0f, std::min(k_f - static_cast<float>(k0), 1.0f));
+                const float full_val = p_full[k0] * (1.0f - frac) + p_full[k1] * frac;
+
+                if (freq > f_b)
+                {
+                    val = full_val;
+                }
+                else
+                {
+                    const float alpha = 0.5f * (1.0f + cosf((float)M_PI * (freq - f_a) * inv_trans));
+                    const float decim_val = (i <= half_n) ? p_decim[i] : full_val;
+                    val = alpha * decim_val + (1.0f - alpha) * full_val;
+                }
+            }
+
+            m_rout[i] = val;
+            totalPower += val;
+            if (val > peakPower)
+                peakPower = val;
         }
+
         m_lastTotalPower = totalPower;
         m_lastPeakPower = peakPower;
     }
 
-    // Peak/total bin power of the last computePower() call, in full-scale
-    // units (a full-scale sine peaks at ~1.0). Used for the level meter.
     float getLastPeakPower() const { return m_lastPeakPower; }
     float getLastTotalPower() const { return m_lastTotalPower; }
 
     float bin2Freq(int bin) const
     {
-        return (float)(bin) * m_freq_resolution;
+        return (float)bin * m_freq_resolution;
     }
 
     float freq2Bin(float freq) const
     {
-        return ((float)freq / m_freq_resolution);
+        return m_freq_resolution > 0.0f ? (freq / m_freq_resolution) : 0.0f;
     }
 
     BufferIODouble *getBufferIO()

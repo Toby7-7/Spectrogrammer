@@ -4,7 +4,7 @@ This document describes how to build, install, launch, and inspect the Android A
 
 ## Artifacts
 - APK: `Spectrogrammer.apk`
-- Package name: `org.nanoorg.Spectrogrammer`
+- Package name: `org.nanoorg.spectrogrammer`
 
 ## Prerequisites
 Make sure the following are available:
@@ -106,23 +106,23 @@ Keep `-r` for reinstalling over an existing app.
 ### Launch with an mDNS service name
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <mdns-service-name> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <mdns-service-name> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 ### Launch with an IP:port target
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <device-ip:port> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <device-ip:port> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 To force-stop before relaunching:
 
 ```bash
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <device-ip:port> shell am force-stop org.nanoorg.Spectrogrammer
+adb -s <device-ip:port> shell am force-stop org.nanoorg.spectrogrammer
 
 env HOME=/tmp/adb-home PATH=/tmp/spectrogrammer-android-sdk/platform-tools:$PATH \
-adb -s <device-ip:port> shell monkey -p org.nanoorg.Spectrogrammer -c android.intent.category.LAUNCHER 1
+adb -s <device-ip:port> shell monkey -p org.nanoorg.spectrogrammer -c android.intent.category.LAUNCHER 1
 ```
 
 ## View Logs
@@ -163,6 +163,17 @@ This removes:
 - The built APK
 - Generated Android manifest files
 - Intermediate output such as `build/`, `libs/`, and `makecapk/lib/`
+
+## Release Signing (Windows & Make)
+- By default, local dev builds fall back to `my-release-key.keystore` (`alias=mykey`) so you can keep installing updates over an existing dev build.
+- For consistent multi-machine or release builds, copy `keystore.properties.example` to `keystore.properties` (gitignored) and set `storeFile`, `storePassword`, `keyAlias`, `keyPassword`, then run:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\build_apk.ps1 -Release
+  ```
+- Or pass signing variables explicitly:
+  - Windows (`build_apk.ps1`): `-KeystoreFile ... -KeyAlias ... -KeystorePass ... -KeyPass ...` (or env vars `KEYSTORE_FILE`, `KEY_ALIAS`, `KEYSTORE_PASS`, `KEY_PASS`).
+  - Make: `make BUILD_ANDROID=y KEYSTOREFILE=release.keystore ALIASNAME=spectrogrammer STOREPASS=... KEYPASS=...`
+- Note: switching from the default dev keystore to a new release keystore changes the APK signing certificate; uninstall the dev build once before installing the release-signed APK.
 
 ## Shortest Common Workflow
 ```bash
