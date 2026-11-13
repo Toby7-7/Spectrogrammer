@@ -420,7 +420,7 @@ static std::string gPendingFilePath;
 static std::atomic<bool> gHasPendingFile{false};
 
 extern "C" JNIEXPORT void JNICALL
-Java_org_nanoorg_spectrogrammer_pr1_SpectrogrammerActivity_nativeOnAudioFileSelected(
+Java_org_nanoorg_spectrogrammer_SpectrogrammerActivity_nativeOnAudioFileSelected(
     JNIEnv *env, jclass /*clazz*/, jstring filePath, jstring /*displayName*/)
 {
     if (filePath == nullptr)

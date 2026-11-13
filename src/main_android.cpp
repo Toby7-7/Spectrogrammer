@@ -782,7 +782,7 @@ static jobject BuildForegroundServiceIntent(JNIEnv *env, jobject nativeActivity)
         intentClass, "setClassName",
         "(Landroid/content/Context;Ljava/lang/String;)Landroid/content/Intent;");
     jmethodID putExtraMethod = env->GetMethodID(intentClass, "putExtra", "(Ljava/lang/String;Z)Landroid/content/Intent;");
-    jstring className = env->NewStringUTF("org.nanoorg.spectrogrammer.pr1.CaptureForegroundService");
+    jstring className = env->NewStringUTF("org.nanoorg.spectrogrammer.CaptureForegroundService");
     env->CallObjectMethod(intent, setClassNameMethod, nativeActivity, className);
     jstring languageExtraKey = env->NewStringUTF("use_chinese_ui");
     env->CallObjectMethod(intent, putExtraMethod, languageExtraKey, Spectrogrammer_UseChineseUi() ? JNI_TRUE : JNI_FALSE);

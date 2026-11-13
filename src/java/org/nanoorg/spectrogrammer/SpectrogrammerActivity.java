@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Toby7-7
 // SPDX-License-Identifier: Apache-2.0
 
-package org.nanoorg.spectrogrammer.pr1;
+package org.nanoorg.spectrogrammer;
 
 import android.app.NativeActivity;
 import android.content.Intent;
@@ -108,22 +108,26 @@ public class SpectrogrammerActivity extends NativeActivity {
                     if (extDir != null && !extDir.exists()) {
                         extDir.mkdirs();
                     }
-                    File outFile = new File(extDir, displayName);
+                    String safeName = (displayName != null) ? new File(displayName).getName() : "";
+                    if (safeName.isEmpty() || ".".equals(safeName) || "..".equals(safeName)) {
+                        safeName = "imported_audio";
+                    }
+                    File outFile = new File(extDir, safeName);
 
-                    InputStream is = getContentResolver().openInputStream(uri);
-                    if (is != null) {
-                        FileOutputStream fos = new FileOutputStream(outFile);
-                        byte[] buf = new byte[65536];
-                        int len;
-                        while ((len = is.read(buf)) > 0) {
-                            fos.write(buf, 0, len);
+                    try (InputStream is = getContentResolver().openInputStream(uri)) {
+                        if (is != null) {
+                            try (FileOutputStream fos = new FileOutputStream(outFile)) {
+                                byte[] buf = new byte[65536];
+                                int len;
+                                while ((len = is.read(buf)) > 0) {
+                                    fos.write(buf, 0, len);
+                                }
+                                fos.flush();
+                            }
+
+                            Log.i(TAG, "Imported audio to: " + outFile.getAbsolutePath());
+                            nativeOnAudioFileSelected(outFile.getAbsolutePath(), safeName);
                         }
-                        fos.flush();
-                        fos.close();
-                        is.close();
-
-                        Log.i(TAG, "Imported audio to: " + outFile.getAbsolutePath());
-                        nativeOnAudioFileSelected(outFile.getAbsolutePath(), displayName);
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "Error importing selected audio file", e);
