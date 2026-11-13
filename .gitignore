@@ -21,6 +21,7 @@ temp.apk
 **/lib/
 **/arm64-v8a/
 *.a
+*.wav
 
 # IDE & Editor files
 .vscode/
@@ -28,3 +29,4 @@ temp.apk
 *.suo
 *.user
 GEMINI.md
+makecapk/res/

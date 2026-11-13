@@ -22,9 +22,9 @@ SRC_DIR?=./src
 KISSFFT_PKGCONFIG:=libs/$(ARCH)/kissfft/lib64/pkgconfig/kissfft-float.pc
 
 ifeq ($(BUILD_ANDROID),y)
-LABEL?=频谱仪-PR1
-APKFILE?=Spectrogrammer-PR1.apk
-PACKAGENAME?=org.nanoorg.spectrogrammer.pr1
+LABEL?=频谱仪
+APKFILE?=Spectrogrammer.apk
+PACKAGENAME?=org.nanoorg.spectrogrammer
 SRC=$(SRC_DIR)/main_android.cpp $(SRC_DIR)/android_native_app_glue.c
 SRC+=$(SRC_DIR)/audio/audio_main.cpp
 SRC+=$(SRC_DIR)/audio/audio_recorder.cpp
@@ -344,14 +344,19 @@ makecapk.apk : doctor-android makecapk/lib/$(ARCH_DIR)/lib$(APPNAME).so $(SRC_DI
 	rm -rf makecapk.apk
 	@ls -l $(APKFILE)
 
+VERSION_CODE?=$(shell git rev-list --count HEAD 2>/dev/null || echo 101)
+VERSION_NAME?=1.1.0
+
 manifest: $(SRC_DIR)/AndroidManifest.xml
 
-$(SRC_DIR)/AndroidManifest.xml : doctor-android
+$(SRC_DIR)/AndroidManifest.xml : $(SRC_DIR)/AndroidManifest.xml.template doctor-android
 	rm -rf $(SRC_DIR)/AndroidManifest.xml
 	PACKAGENAME=$(PACKAGENAME) \
 		ANDROIDVERSION=$(ANDROIDVERSION) \
 		ANDROIDTARGET=$(ANDROIDTARGET) \
-		APPNAME=$(APPNAME) envsubst '$$ANDROIDTARGET $$ANDROIDVERSION $$APPNAME $$PACKAGENAME' \
+		APPNAME=$(APPNAME) \
+		VERSION_CODE=$(VERSION_CODE) \
+		VERSION_NAME=$(VERSION_NAME) envsubst '$$ANDROIDTARGET $$ANDROIDVERSION $$APPNAME $$PACKAGENAME $$VERSION_CODE $$VERSION_NAME' \
 		< $(SRC_DIR)/AndroidManifest.xml.template > $(SRC_DIR)/AndroidManifest.xml
 
 uninstall : check-adb

@@ -1,4 +1,4 @@
-# Build script for Spectrogrammer-PR1 on Windows with Android NDK & SDK
+# Build script for Spectrogrammer on Windows with Android NDK & SDK
 
 $ErrorActionPreference = "Stop"
 
@@ -34,9 +34,9 @@ $APKSIGNER = "$BUILD_TOOLS\apksigner.bat"
 
 $ARCH = "arm64-v8a"
 $APPNAME = "Spectrogrammer"
-$LABEL = "频谱仪-PR1"
-$PACKAGENAME = "org.nanoorg.spectrogrammer.pr1"
-$APKFILE = "Spectrogrammer-PR1.apk"
+$LABEL = "Spectrogrammer"
+$PACKAGENAME = "org.nanoorg.spectrogrammer"
+$APKFILE = "Spectrogrammer.apk"
 $KEYSTOREFILE = "$REPO_ROOT\my-release-key.keystore"
 $STOREPASS = "123456"
 $ALIASNAME = "mykey"
@@ -145,6 +145,26 @@ $JAVA_SOURCES = (Get-ChildItem -Path "src/java" -Recurse -Filter "*.java").FullN
 & cmd.exe /c "`"$D8`" --lib `"$PLATFORM_JAR`" --output `"$JAVA_DEX_DIR`" `"$JAVA_JAR_FILE`""
 
 Write-Host "==> 6. Packaging APK Resources..." -ForegroundColor Cyan
+
+# Dynamically calculate VersionCode and VersionName
+$GIT_COUNT = (git rev-list --count HEAD 2>$null)
+if (-not $GIT_COUNT) { $GIT_COUNT = 101 }
+$VERSION_CODE = [int]$GIT_COUNT
+$VERSION_NAME = "1.1.0"
+Write-Host "Configuring Manifest: package=$PACKAGENAME, versionCode=$VERSION_CODE, versionName=$VERSION_NAME" -ForegroundColor Yellow
+
+$TEMPLATE = Get-Content "$REPO_ROOT\src\AndroidManifest.xml.template" -Raw
+$MANIFEST_CONTENT = $TEMPLATE `
+    -replace '\$\{PACKAGENAME\}', $PACKAGENAME `
+    -replace '\$\{ANDROIDVERSION\}', "29" `
+    -replace '\$\{ANDROIDTARGET\}', "29" `
+    -replace '\$\{APPNAME\}', $APPNAME `
+    -replace '\$\{VERSION_CODE\}', $VERSION_CODE `
+    -replace '\$\{VERSION_NAME\}', $VERSION_NAME
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText("$REPO_ROOT\src\AndroidManifest.xml", $MANIFEST_CONTENT, $utf8NoBom)
+
 Remove-Item -Force -ErrorAction SilentlyContinue "$REPO_ROOT\temp.apk", "$REPO_ROOT\makecapk.apk", "$REPO_ROOT\$APKFILE"
 New-Item -ItemType Directory -Force -Path "$REPO_ROOT\makecapk\assets" | Out-Null
 
@@ -181,11 +201,14 @@ Write-Host "==> 7. Aligning APK with zipalign..." -ForegroundColor Cyan
 Write-Host "==> 8. Signing APK..." -ForegroundColor Cyan
 if (-not (Test-Path $KEYSTOREFILE)) {
     Write-Host "Generating release keystore..." -ForegroundColor Yellow
-    & $KEYTOOL -genkeypair -v -keystore $KEYSTOREFILE -alias $ALIASNAME -keyalg RSA -keysize 2048 -validity 10000 -storepass $STOREPASS -keypass $STOREPASS -dname "CN=Spectrogrammer, OU=PR1, O=NanoOrg, L=Unknown, ST=Unknown, C=CN"
+    & $KEYTOOL -genkeypair -v -keystore $KEYSTOREFILE -alias $ALIASNAME -keyalg RSA -keysize 2048 -validity 10000 -storepass $STOREPASS -keypass $STOREPASS -dname "CN=Spectrogrammer, OU=NanoOrg, O=NanoOrg, L=Unknown, ST=Unknown, C=CN"
 }
 
 & cmd.exe /c "`"$APKSIGNER`" sign --key-pass pass:$STOREPASS --ks-pass pass:$STOREPASS --ks `"$KEYSTOREFILE`" `"$REPO_ROOT\$APKFILE`""
 & cmd.exe /c "`"$APKSIGNER`" verify `"$REPO_ROOT\$APKFILE`""
+
+# Clean up temporary build artifacts in makecapk and root
+Remove-Item -Force -ErrorAction SilentlyContinue "$REPO_ROOT\makecapk\classes.dex", "$REPO_ROOT\makecapk\resources.arsc", "$REPO_ROOT\makecapk\AndroidManifest.xml", "$REPO_ROOT\temp.apk", "$REPO_ROOT\makecapk.apk"
 
 Write-Host "==> BUILD SUCCESSFUL! Output: $REPO_ROOT\$APKFILE" -ForegroundColor Green
 Get-Item "$REPO_ROOT\$APKFILE" | Select-Object Name, Length, LastWriteTime

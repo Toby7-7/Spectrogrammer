@@ -30,4 +30,4 @@ $bw.Write([int]$samples.Length)
 $bw.Write($samples)
 
 [System.IO.File]::WriteAllBytes("$PSScriptRoot\test_440hz.wav", $ms.ToArray())
-& "D:\develop\android\platform-tools\adb.exe" -s 192.168.1.4:5555 push "$PSScriptRoot\test_440hz.wav" /sdcard/Android/data/org.nanoorg.spectrogrammer.pr1/files/
+& "D:\develop\android\platform-tools\adb.exe" -s 192.168.1.4:5555 push "$PSScriptRoot\test_440hz.wav" /sdcard/Android/data/org.nanoorg.spectrogrammer/files/
